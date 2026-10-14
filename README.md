@@ -1,7 +1,9 @@
 # AgentBridge Studio
 0.6.2-mac-resume.1 修正預覽版：基於 0.6.1，修正連接 Windows Runtime 後恢復舊對話時的「Runtime 尚未載入 Mac 工具」錯誤。保留多任務並行及既有功能。
 
-[下載這份修正預覽版](https://github.com/s410320-lang/AgentBridgeStudio/releases/tag/v0.6.2-mac-resume.1) · [修正 PR](https://github.com/iancheng64-cmd/AgentBridgeStudio/pull/1)
+[下載完整原始碼](https://github.com/s410320-lang/AgentBridgeStudio/archive/refs/heads/main.zip) · [修正 PR](https://github.com/iancheng64-cmd/AgentBridgeStudio/pull/1)
+
+修正預覽版 DMG 已在本機建置並驗證；GitHub Release 的大檔上傳尚未完成，目前提供原始碼下載與建置流程。
 
 [繁體中文](README.md) · [English](README_EN.md)
 

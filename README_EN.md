@@ -1,9 +1,11 @@
 # AgentBridge Studio
 0.6.2-mac-resume.1 fix preview, based on 0.6.1: repairs Mac tool verification when resuming old Codex conversations after reconnecting to the Windows Runtime. Existing parallel-task features are retained.
 
-[Download this fix preview](https://github.com/s410320-lang/AgentBridgeStudio/releases/tag/v0.6.2-mac-resume.1) · [Fix PR](https://github.com/iancheng64-cmd/AgentBridgeStudio/pull/1)
+[Download the complete source](https://github.com/s410320-lang/AgentBridgeStudio/archive/refs/heads/main.zip) · [Fix PR](https://github.com/iancheng64-cmd/AgentBridgeStudio/pull/1)
 
-[English](README_EN.md) · [繁體中文](README.md)
+[English](README_EN.md) · The preview DMG has been built and verified locally. Its GitHub Release upload has not completed; the complete source and build instructions are available.
+
+[繁體中文](README.md)
 
 Chat with OpenAI Codex and Anthropic Claude Code on your Mac, empowering agents to operate files, shell commands, native applications, and browsers on **this Mac**. Model runtime execution and login credentials remain on your chosen remote host, while operational tools execute locally on your Mac.
 
