@@ -1,3 +1,6 @@
+import {TaskRuntimePool} from './task-runtime-pool';
+import {connectNetwork} from './connection-network';
+import {runtimeFailure} from './runtime-errors';
 import { rateLimitSummary, mergeRateLimitSummary, tokenCount, tokenDelta, type TokenCount } from "./runtime-usage";
 import {permissionMode,codexPermissionPolicy} from './permission-policy';
 import {captureRemote, resolveRemotePlatform, remoteLaunchError, type RuntimePlatform} from './remote-shell';
@@ -21,22 +24,30 @@ import { localExtensionCatalog, writeExtensionManifest, macRuntimeInstructions, 
 interface ConnectInput {
   profile: any; password?: string; platform: RuntimePlatform; executable?: string;
   permissionMode?: "ask" | "project" | "full"; trustedFingerprint?: string; localCwd?: string; localHostExecutable?: string;
+  autoCompactPercent?: number;
 }
-interface Dependencies { connectConfig(payload: any): ConnectConfig; emit(channel: string, payload: unknown): void; window(): BrowserWindow | null;
-  libraryEntries?(ids: string[]): Promise<RuntimeAttachment[]>; libraryRoot?: string;
+interface Dependencies { connectRelay?(input:any):Promise<Client>; connectConfig(payload: any): ConnectConfig; emit(channel: string, payload: unknown): void; window(): BrowserWindow | null;
+  libraryEntries?(ids: string[]): Promise<RuntimeAttachment[]>; libraryRoot?: string; stateDirectory?:string;
   extensionServers?(cwd: string): Promise<MacExtensionServer[]>;
   extensions?(cwd: string): Promise<RuntimeExtensionCatalog>; readOnlyExtensionRoots?: string[];
   localTools?: { nativeCommand?: LocalToolCommand; browserCommand?: LocalToolCommand } | (()=>{nativeCommand?:LocalToolCommand;browserCommand?:LocalToolCommand});
 }
 export interface BackgroundTurnResult { requestId: string; conversationId?: string; text: string; status: "completed" | "cancelled" | "error" }
-interface TurnRun { acceptUsage?:boolean; usageBaseline?:TokenCount; usageComplete?:boolean; requestId: string; threadId?: string; turnId?: string; cancelled: boolean; messages: Map<string, string>; backgroundTextOnly?: boolean; backgroundError?: string; completion?: { resolve: (result: BackgroundTurnResult) => void; reject: (error: Error) => void } }
+interface TurnRun { turnStarting?:boolean;acceptUsage?:boolean; usageBaseline?:TokenCount; usageComplete?:boolean; requestId: string; threadId?: string; turnId?: string; cancelled: boolean; messages: Map<string, string>; backgroundTextOnly?: boolean; backgroundError?: string; completion?: { resolve: (result: BackgroundTurnResult) => void; reject: (error: Error) => void } }
 interface PendingRequest { request: RpcRequest; requestId?: string; localResolve?: (accepted: boolean) => void; timer?: NodeJS.Timeout }
 interface Runtime {
   id: string; conn: Client; rpc: AppServerRpc; host?: LocalCodeModeHost; executor?: LocalExecServer; snapshot: any;
-  toolHost?: LocalToolHost; toolForward?: LoopbackForward; mcp?: { name: string; url: string; token: string; environmentId: string }; permissionMode: "ask" | "project" | "full"; manifestPath: string; extensionCatalog: RuntimeExtensionCatalog;
+  executorUrl?:string; toolHost?: LocalToolHost; toolForward?: LoopbackForward; mcp?: { name: string; url: string; token: string; environmentId: string }; permissionMode: "ask" | "project" | "full"; manifestPath: string; extensionCatalog: RuntimeExtensionCatalog;
   run?: TurnRun; requests: Map<string, PendingRequest>; closed: boolean; localCwd: string;
   quotaEpoch:number;quotaRevision:number;quotaRequest:number;
+  autoCompactPercent?: number;
+  threadContextWindows: Map<string, number>;
+  threadContextTokens: Map<string, number>;
+  compactingThreads: Set<string>;
 }
+let taskPool:TaskRuntimePool<any>;
+export const acquireCodexTask=(rootId:string,taskId:string,requestId:string)=>taskPool.acquire(rootId,taskId,requestId);
+export const releaseCodexTask=(id:string,requestId:string)=>taskPool.release(id,requestId);
 const runtimes = new Map<string, Runtime>();
 const usageByThread=new Map<string,TokenCount>();
 const quotaByRuntime=new Map<string,ReturnType<typeof rateLimitSummary>>();
@@ -197,6 +208,10 @@ function routeNotification(runtime: Runtime, deps: Dependencies, message: any) {
     for (const [id, pending] of runtime.requests) if (pending.request.id === params.requestId) { runtime.requests.delete(id); emitForRun(runtime, deps, { type: "requestClosed", approvalId: id }); }
     return;
   }
+  if (message.method === "thread/compacted") {
+    deps.emit("runtime:event", { runtimeId: runtime.id, type: "activity", text: "Codex 對話上下文已完成自動壓縮" });
+    return;
+  }
   if (!run) return;
   if (params.threadId && run.threadId && params.threadId !== run.threadId) return;
   const eventTurnId = params.turnId || params.turn?.id;
@@ -205,7 +220,12 @@ function routeNotification(runtime: Runtime, deps: Dependencies, message: any) {
     if(!run.acceptUsage||!run.threadId||params.threadId!==run.threadId)return;
     const total=tokenCount(params.tokenUsage?.total);const key=runtime.id+":"+params.threadId;
     usageByThread.set(key,total);
-    const usage=run.usageComplete?tokenDelta(total,run.usageBaseline):{...tokenCount(params.tokenUsage?.last),totalTokens:null};
+    const modelContextWindow = Number(params.tokenUsage?.modelContextWindow) || 0;
+    if (modelContextWindow > 0) runtime.threadContextWindows.set(params.threadId, modelContextWindow);
+    const lastUsage = tokenCount(params.tokenUsage?.last);
+    const activeContextTokens = ((lastUsage.inputTokens || 0) + (lastUsage.cachedInputTokens || 0)) || (total.inputTokens || 0);
+    if (activeContextTokens > 0) runtime.threadContextTokens.set(params.threadId, activeContextTokens);
+    const usage=run.usageComplete?tokenDelta(total,run.usageBaseline):{...lastUsage,totalTokens:null};
     emitForRun(runtime,deps,{type:"usage",turnId:params.turnId,usage:{...usage,source:run.usageComplete?"codex-thread-delta":"codex-last-request",complete:run.usageComplete===true}});return;
   }
   if (message.method === "turn/started") { run.turnId = params.turn?.id; run.acceptUsage=true;emitForRun(runtime, deps, { type: "activity", text: "Codex 正在思考" }); }
@@ -224,21 +244,48 @@ function routeNotification(runtime: Runtime, deps: Dependencies, message: any) {
     const names: Record<string, string> = { commandExecution: "正在執行命令", fileChange: "正在修改檔案", mcpToolCall: "正在使用工具", webSearch: "正在搜尋", reasoning: "正在思考" };
     if (names[params.item?.type]) emitForRun(runtime, deps, { type: "activity", text: names[params.item.type] });
   } else if (message.method === "error") {
-    run.backgroundError = params.error?.message || "Runtime 回報錯誤。";
-    emitForRun(runtime, deps, { type: "error", text: run.backgroundError });
+    const err = params.error || params;
+    if(params.willRetry===true){emitForRun(runtime,deps,{type:'activity',text:'原生 Runtime 正在重試連線，已保留收到的內容。'});return;}
+    const failure=runtimeFailure(err);run.backgroundError=failure.text;
+    emitForRun(runtime, deps, { type: "error", ...failure });
   }
   else if (message.method === "turn/completed") {
-    if (params.turn?.error) {
-      run.backgroundError = params.turn.error.message || "這次回覆失敗。";
-      emitForRun(runtime, deps, { type: "error", text: run.backgroundError });
+    const turn = params.turn || {};
+    const rawError = turn.error || params.error;
+    const failed=turn.status === "failed" || turn.status === "error";
+    const failure=rawError||failed?runtimeFailure(rawError||turn.statusDetails?.message||turn.failureReason):undefined;
+    const errorText=failure?.text;
+    if (errorText) {
+      run.backgroundError = errorText;
+      emitForRun(runtime, deps, { type: "error", ...failure });
+      if(failure?.category==='quota'||failure?.category==='rate-limit')void readRuntimeQuota(runtime).then(quota=>{if(!runtime.closed)deps.emit('runtime:event',{runtimeId:runtime.id,type:'quota',quota});});
     }
     for (const [id, pending] of runtime.requests) if (pending.requestId === run.requestId) { clearTimeout(pending.timer); pending.localResolve?.(false); runtime.requests.delete(id); emitForRun(runtime, deps, { type: "requestClosed", approvalId: id }); }
     runtime.toolHost?.cancelActive();
-    const status: BackgroundTurnResult["status"] = run.cancelled || params.turn?.status === "interrupted" ? "cancelled" : params.turn?.status === "failed" || run.backgroundError ? "error" : "completed";
+    const status: BackgroundTurnResult["status"] = run.cancelled || turn.status === "interrupted" ? "cancelled" : turn.status === "failed" || turn.status === "error" || run.backgroundError ? "error" : "completed";
     const result = { requestId: run.requestId, conversationId: run.threadId, text: [...run.messages.values()].filter(Boolean).join("\n\n"), status };
-    emitForRun(runtime, deps, { type: "done", status });
+    emitForRun(runtime, deps, { type: "done", status, conversationId:run.threadId, text: run.backgroundError, error: run.backgroundError });
+    const currentThreadId = run.threadId;
     runtime.run = undefined;
     run.completion?.resolve(result);
+    if (status === "completed" && currentThreadId && !runtime.compactingThreads.has(currentThreadId)) {
+      const compactPct = runtime.autoCompactPercent || 70;
+      const windowTokens = runtime.threadContextWindows.get(currentThreadId) || 128000;
+      const currentTokens = runtime.threadContextTokens.get(currentThreadId) || 0;
+      if (windowTokens > 0 && currentTokens >= Math.round(windowTokens * (compactPct / 100))) {
+        runtime.compactingThreads.add(currentThreadId);
+        setImmediate(async () => {
+          try {
+            deps.emit("runtime:event", { runtimeId: runtime.id, type: "activity", text: `上下文用量達 ${Math.round((currentTokens / windowTokens) * 100)}%，正在自動壓縮對話` });
+            await runtime.rpc.request("thread/compact/start", { threadId: currentThreadId });
+            deps.emit("runtime:event", { runtimeId: runtime.id, type: "activity", text: "Codex 對話上下文已完成自動壓縮" });
+          } catch {
+          } finally {
+            runtime.compactingThreads.delete(currentThreadId);
+          }
+        });
+      }
+    }
   }
 }
 function routeServerRequest(runtime: Runtime, deps: Dependencies, request: RpcRequest) {
@@ -362,37 +409,36 @@ export async function cancelCodexBackgroundTurn(runtimeId: string) {
   if (run.threadId && run.turnId) {
     try { await runtime.rpc.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId }); } catch {}
   }
+  // The background turn's promise only resolves on turn/completed. A runtime that
+  // never reports it would keep the orchestrator awaiting forever.
+  const pending = run.completion;
+  if (pending && runtime.run === run) {
+    runtime.run = undefined;
+    queueMicrotask(() => pending.resolve({ requestId: run.requestId, conversationId: run.threadId, text: [...run.messages.values()].filter(Boolean).join("\n\n"), status: "cancelled" }));
+  }
   return { cancelled: true };
 }
 
 export function registerRuntimeBackend(deps: Dependencies) {
+  const pool=new TaskRuntimePool<any>(id=>{const runtime=runtimes.get(id);if(runtime)closeRuntime(runtime,deps);});
+  taskPool=pool;
+  const emit=deps.emit;
+  deps={...deps,emit:(channel,payload:any)=>{if(payload.type==='done')pool.release(payload.runtimeId,payload.requestId);if(payload.type==='closed')pool.forget(payload.runtimeId);emit(channel,payload);}};
   const getRuntime = (id: string) => { const runtime = runtimes.get(id); if (!runtime || runtime.closed) throw new Error("請先連線至 Codex Runtime。"); return runtime; };
   ipcMain.handle("runtime:chooseLocalDirectory", async () => {
     const options = { title: "選擇這台 Mac 的工作資料夾", properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory"> };
     const window = deps.window(); const chosen = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
     return chosen.canceled ? null : chosen.filePaths[0] || null;
   });
-  ipcMain.handle("runtime:connect", async (_event, input: ConnectInput) => {
-    if (!input?.profile || typeof input.profile.host !== "string" || !input.profile.host.trim()) throw new Error("請提供有效的 Runtime 主機。");
+  const connectRuntime = async (_event:any, input: ConnectInput):Promise<any> => {
     if (!["auto", "windows", "posix"].includes(input.platform)) throw new Error("請選擇 Runtime 作業系統。");
-    const conn = new Client(); const config = deps.connectConfig(input);
-    conn.on("error", () => {});
-    const key = `${String(input.profile.host).toLowerCase()}:${input.profile.port || 22}`;
-    const previous = readTrustedHosts()[key]; let challenge: any; let observed = "";
-    config.hostVerifier = (rawKey: Buffer) => {
-      observed = hostFingerprint(rawKey);
-      if (observed === previous || observed === input.trustedFingerprint) return true;
-      challenge = { status: "host-confirmation", hostFingerprint: observed, previousFingerprint: previous, hostChanged: Boolean(previous) };
-      return false;
-    };
-    try {
-      await new Promise<void>((resolve, reject) => { conn.once("ready", resolve); conn.once("error", reject); conn.connect(config); });
-    } catch (error) { try { conn.end(); conn.destroy(); } catch {} if (challenge) return challenge; throw error; }
+    const connected=await connectNetwork(input,()=>connectTrustedRuntimeSsh(input,deps.connectConfig),()=>{if(!deps.connectRelay)throw new Error('Relay 尚未就緒。');return deps.connectRelay(input);});
+    if(connected.confirmation)return connected.confirmation;
+    const conn:Client=connected.conn, key=connected.key, observed=connected.fingerprint;
     const executable = input.executable?.trim() || "codex";
     let host: LocalCodeModeHost | undefined; let executor: LocalExecServer | undefined; let executorUrl: string | undefined; let toolHost: LocalToolHost | undefined; let toolForward: LoopbackForward | undefined; let mcp: Runtime["mcp"]; let initializationFailure = ""; let rpc: AppServerRpc | undefined;
     try {
-      trustHost(key, observed);
-      const platform = await resolveRemotePlatform(conn, input.platform);
+      const platform = connected.transport==='https-relay'?((conn as any).platform==='win32'?'windows':'posix'):await resolveRemotePlatform(conn, input.platform);
       const preflight = async (args:string[]) => {
         try { return await captureRemote(conn, appServerCommand(platform, executable, args)); }
         catch(error) { throw remoteLaunchError(platform, error instanceof Error ? error.message : String(error)); }
@@ -423,8 +469,8 @@ export function registerRuntimeBackend(deps: Dependencies) {
         try {
           if (deps.libraryRoot) await fs.promises.mkdir(deps.libraryRoot, { recursive: true });
           const extensionServers = deps.extensionServers ? await deps.extensionServers(localCwd) : [];
-          toolHost = new LocalToolHost({ extensionServers, allowedRoots: [localCwd], readOnlyRoots: [...(deps.libraryRoot ? [deps.libraryRoot] : []), manifestRoot, ...extensionRoots], agentRole: "codex", ...(typeof deps.localTools==="function"?deps.localTools():deps.localTools),
-            authorize: call => authorizeMacTool(runtime, deps, call) });
+          toolHost = new LocalToolHost({ stateDirectory:deps.stateDirectory, extensionServers, allowedRoots: [localCwd], readOnlyRoots: [...(deps.libraryRoot ? [deps.libraryRoot] : []), manifestRoot, ...extensionRoots], agentRole: "codex", ...(typeof deps.localTools==="function"?deps.localTools():deps.localTools),
+            fullFilesystemAccess: input.permissionMode === "full", authorize: call => authorizeMacTool(runtime, deps, call) });
           const local = await toolHost.start();
           // The registered Mac executor forwards HTTP through the existing SSH channel.
           mcp = { name: `agentbridge_mac_${randomUUID().replaceAll("-", "")}`, url: local.url, token: local.token, environmentId: executor!.environmentId };
@@ -453,27 +499,39 @@ export function registerRuntimeBackend(deps: Dependencies) {
       if (rpc.isClosed) throw new Error("Runtime 在初始化期間已中斷連線。");
       if (executorEnvironment && !executor?.isRunning) throw new Error("Mac Executor 在初始化期間已結束。");
       if (hostUrl && !host?.isRunning) throw new Error("Mac Code Mode Host 在初始化期間已結束。");
-      runtime = { id, conn, rpc, host, executor, toolHost, toolForward, mcp, quotaEpoch:0,quotaRevision:0,quotaRequest:0, manifestPath: path.join(manifestRoot, `${id}.json`), extensionCatalog: { items: [], warnings: [] }, permissionMode: ["ask", "full"].includes(input.permissionMode || "") ? input.permissionMode! : "project", requests: new Map(), closed: false, localCwd, snapshot: {
+      runtime = { id, conn, rpc, host, executor, executorUrl, toolHost, toolForward, mcp, quotaEpoch:0,quotaRevision:0,quotaRequest:0, manifestPath: path.join(manifestRoot, `${id}.json`), extensionCatalog: { items: [], warnings: [] }, permissionMode: ["ask", "full"].includes(input.permissionMode || "") ? input.permissionMode! : "project", requests: new Map(), closed: false, localCwd,
+        autoCompactPercent: input.autoCompactPercent || 70, threadContextWindows: new Map(), threadContextTokens: new Map(), compactingThreads: new Set(), snapshot: {
         runtimeId: id, status: "connected", toolExecution: executorEnvironment ? "local-executor" : "unavailable", account: accountSummary(account), models: modelResponse,
         capabilities: { ...localToolCapability(Boolean(hostUrl), Boolean(executorEnvironment), Boolean(mcp)), ...(!executorEnvironment && hostWarning ? { reason: hostWarning } : {}) }, runtimeVersion: version, codeModeHostConnected: Boolean(hostUrl), localHostVersion: host?.installation.version,
         macTools: toolHost?.status(), permissionMode: input.permissionMode || "project", executorConnected: Boolean(executorEnvironment), executorVersion: executor?.installation.version, executorEnvironment,
         runtimePlatform: initialized.platformOs || platform, connectionPlatform: platform, hostName: input.profile.name || input.profile.host, hostKey: key,
-        hostFingerprint: observed, ...(hostWarning ? { diagnostic: hostWarning } : {})
+        profileId:input.profile.id,relayUrl:input.profile.relayUrl,transport:connected.transport,networkDiagnostics:connected.diagnostics,hostFingerprint: observed, ...(hostWarning ? { diagnostic: hostWarning } : {})
       } };
       const current = runtime;
       runtimes.set(id, current);
       rpc.on("notification", message => routeNotification(current, deps, message));
       rpc.on("closed", error => closeRuntime(current, deps, error.message));
-      conn.on("error", () => closeRuntime(current, deps, "SSH 連線發生錯誤，Runtime 已關閉。"));
-      conn.on("close", () => closeRuntime(current, deps, "SSH 已中斷，Runtime 與 Mac 工具通道已關閉。"));
+      conn.on('error',(error:Error)=>closeRuntime(current,deps,/ERR_AUTH/.test(error.message)?'ERR_AUTH：Relay 授權已失效，請重新配對。':'網路連線發生錯誤，Runtime 已關閉。'));
+      conn.on("close", () => closeRuntime(current, deps, "網路已中斷，Runtime 與 Mac 工具通道已關閉；未重送指令。"));
       return current.snapshot;
-    } catch (error) { rpc?.close(); host?.stop(); executor?.stop(); toolForward?.stop(); await toolHost?.stop(); conn.end(); if (initializationFailure) throw new Error(initializationFailure); throw error; }
+    } catch (error) { rpc?.close(); host?.stop(); executor?.stop(); toolForward?.stop(); await toolHost?.stop(); conn.end(); if(input.profile.networkMode!=='direct'&&input.profile.networkMode!=='relay'&&connected.transport==='tailscale-ssh'&&input.profile.relayUrl&&/timeout|timed out|中斷|結束|handshake/i.test(String(initializationFailure||error)))return connectRuntime(_event,{...input,profile:{...input.profile,networkMode:'relay'}}); if (initializationFailure) throw new Error(initializationFailure); throw error; }
+  };
+  ipcMain.handle("runtime:connect",async(event,input:ConnectInput)=>{
+    const result=await connectRuntime(event,input);
+    if(result.runtimeId)pool.register(result,()=>connectRuntime(event,{...input,permissionMode:runtimes.get(result.runtimeId)?.permissionMode||input.permissionMode}));
+    if(result.runtimeId)event.sender?.once('destroyed',()=>{void pool.disconnect(result.runtimeId);});
+    return result;
   });
-  ipcMain.handle("runtime:disconnect", (_event, id: string) => { const runtime = runtimes.get(id); if (runtime) closeRuntime(runtime, deps); });
+  ipcMain.handle('runtime:acquireTask',async(_event,input:any)=>{
+    const leased=await pool.acquire(input.runtimeId,input.taskId,input.requestId);
+    return getRuntime(leased.runtimeId).snapshot;
+  });
+  ipcMain.handle('runtime:releaseTask',(_event,id:string,requestId:string)=>{if(!runtimes.get(id)?.run)pool.release(id,requestId);});
+  ipcMain.handle("runtime:disconnect", async (_event, id: string) => { await pool.disconnect(id);const runtime = runtimes.get(id); if (runtime) closeRuntime(runtime, deps); });
   ipcMain.handle('runtime:permission',(_event,id:string,value:unknown)=>{
     const runtime=getRuntime(id),mode=permissionMode(value);
     if(runtime.run&&runtime.permissionMode==='full'&&mode!=='full')throw new Error('請先停止目前工作，再降低操作權限。');
-    runtime.permissionMode=mode;runtime.snapshot.permissionMode=runtime.permissionMode;
+    runtime.permissionMode=mode;runtime.toolHost?.setFullFilesystemAccess(mode==='full');runtime.snapshot.permissionMode=runtime.permissionMode;runtime.snapshot.macTools=runtime.toolHost?.status();
     if(runtime.permissionMode==='full')for(const [key,pending]of runtime.requests){
       if(pending.request.method==='item/tool/requestUserInput')continue;
       if(pending.localResolve){clearTimeout(pending.timer);pending.localResolve(Boolean(runtime.run&&!runtime.run.cancelled&&!runtime.run.backgroundTextOnly));}
@@ -511,18 +569,31 @@ export function registerRuntimeBackend(deps: Dependencies) {
     if (attachmentIds.length && !deps.libraryEntries) throw new Error("檔案庫尚未就緒。");
     const attachments = attachmentIds.length ? await deps.libraryEntries!(attachmentIds) : [];
     const turnInput = await runtimeInput(input.prompt.trim() || "請查看並處理附加的檔案。", attachments);
+    if (typeof input.customInstructions === "string" && input.customInstructions.trim()) {
+      turnInput.push({ type: "text", text: `使用者自訂指令（適用於本次對話）：\n${input.customInstructions.trim()}`, text_elements: [] });
+    }
     const localCwd = await fs.promises.realpath(input.localCwd || runtime.localCwd);
     if (!(await fs.promises.stat(localCwd)).isDirectory()) throw new Error("Mac 工作目錄必須是資料夾。");
     if (localCwd !== runtime.localCwd) throw new Error("變更 Mac 工作目錄後請重新連線，以同步檔案工具權限。");
     // A second send may have entered while filesystem validation was pending.
     if (runtime.closed || runtime.run) throw new Error("Runtime 已中斷或仍在處理上一則訊息。");
+    if (typeof input.autoCompactPercent === "number") runtime.autoCompactPercent = input.autoCompactPercent;
     const run: TurnRun = { requestId: input.requestId || randomUUID(), cancelled: false, messages: new Map() }; runtime.run = run;
     setImmediate(async () => {
       try {
         await refreshMacExtensions(runtime, deps);
-        if (runtime.closed || runtime.run !== run || run.cancelled) return;
+        if (runtime.closed || runtime.run !== run) return;
+        if (run.cancelled) { emitForRun(runtime, deps, { type: "done", status: "cancelled" }); runtime.run = undefined; return; }
+        if(input.conversationId&&input.executorEnvironmentId&&runtime.executor&&runtime.executorUrl&&input.executorEnvironmentId!==runtime.executor.environmentId){
+          const environment=await runtime.executor.register(runtime.rpc,runtime.executorUrl,input.executorEnvironmentId);
+          runtime.snapshot.executorEnvironment=environment;
+          if(runtime.mcp)runtime.mcp.environmentId=environment.environmentId;
+          emitForRun(runtime,deps,{type:"status",snapshot:runtime.snapshot});
+        }
         const configuration = await runtime.rpc.request("config/read", { includeLayers: false });
-        const config = macThreadConfig(configuration.config, runtime.mcp);
+        if (runtime.closed || runtime.run !== run) return;
+        if (run.cancelled) { emitForRun(runtime, deps, { type: "done", status: "cancelled" }); runtime.run = undefined; return; }
+        const config = macThreadConfig(configuration.config, runtime.mcp, runtime.autoCompactPercent);
         const thread = await runtime.rpc.request(input.conversationId ? "thread/resume" : "thread/start", {
           ...(input.conversationId ? { threadId: input.conversationId } : {}), developerInstructions: macRuntimeInstructions(localCwd, runtime.manifestPath, runtime.toolHost?.status().tools || [], runtime.extensionCatalog), model: input.model || undefined,
           ...(runtime.executor ? (!input.conversationId ? { environments: [{ environmentId: runtime.executor.environmentId, cwd: localCwd }] } : {}) : { cwd: localCwd }), config, ...codexPermissionPolicy(runtime.permissionMode)
@@ -538,15 +609,19 @@ export function registerRuntimeBackend(deps: Dependencies) {
           emitForRun(runtime, deps, { type: "error", text: reason }); closeRuntime(runtime, deps, reason); return;
         }
         if (runtime.closed || runtime.run !== run) return;
-        emitForRun(runtime, deps, { type: "session", conversationId: run.threadId });
+        emitForRun(runtime, deps, { type: "session", conversationId: run.threadId, executorEnvironmentId:runtime.executor?.environmentId });
         if (run.cancelled) { emitForRun(runtime, deps, { type: "done", status: "cancelled" }); runtime.run = undefined; return; }
+        run.turnStarting=true;
         const result = await runtime.rpc.request("turn/start", { threadId: run.threadId, environments: [{ environmentId: runtime.executor!.environmentId, cwd: localCwd }], input: turnInput, model: input.model || undefined, effort: input.effort || undefined });
         if (runtime.closed || runtime.run !== run) return;
         run.turnId = result.turn.id;run.acceptUsage=true;
         if (run.cancelled) await runtime.rpc.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId });
       } catch (error) {
         if (runtime.closed || runtime.run !== run) return;
-        emitForRun(runtime, deps, { type: "error", text: error instanceof Error ? error.message : String(error) }); emitForRun(runtime, deps, { type: "done", status: "error" }); runtime.run = undefined;
+        const failure=runtimeFailure(error);
+        // Recovery is offered only when resume failed before any model turn began.
+        if(input.conversationId&&!run.threadId&&failure.category==='session-missing')emitForRun(runtime,deps,{type:'sessionUnavailable',conversationId:input.conversationId});
+        emitForRun(runtime, deps, { type: "error", ...failure }); emitForRun(runtime, deps, { type: "done", status: "error",text:failure.text }); runtime.run = undefined;
       }
     });
     return { requestId: run.requestId };
@@ -560,6 +635,21 @@ export function registerRuntimeBackend(deps: Dependencies) {
       runtime.requests.delete(id); emitForRun(runtime, deps, { type: "requestClosed", approvalId: id });
     }
     if (run.threadId && run.turnId) await runtime.rpc.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId });
+    else if(!run.turnStarting){
+      emitForRun(runtime,deps,{type:"done",status:"cancelled",conversationId:run.threadId});
+      if(runtime.run===run)runtime.run=undefined;
+      run.completion?.resolve({requestId:run.requestId,conversationId:run.threadId,text:[...run.messages.values()].join("\n\n"),status:"cancelled"});
+    }
+    // A turn in flight is normally released by the turn/completed notification.
+    // Guard against a runtime that never reports it, or the composer stays locked.
+    if ((run.turnId || run.turnStarting) && runtime.run === run) {
+      setTimeout(() => {
+        if (runtime.run !== run || !run.cancelled) return;
+        emitForRun(runtime, deps, { type: "done", status: "cancelled", conversationId: run.threadId });
+        runtime.run = undefined;
+        run.completion?.resolve({ requestId: run.requestId, conversationId: run.threadId, text: [...run.messages.values()].join("\n\n"), status: "cancelled" });
+      }, 5000).unref();
+    }
     return { cancelled: true };
   });
   ipcMain.handle("runtime:respond", (_event, input: any) => {

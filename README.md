@@ -1,12 +1,47 @@
 # AgentBridge Studio
+0.6.2-mac-resume.1 修正預覽版：基於 0.6.1，修正連接 Windows Runtime 後恢復舊對話時的「Runtime 尚未載入 Mac 工具」錯誤。保留多任務並行及既有功能。
+
+[下載這份修正預覽版](https://github.com/s410320-lang/AgentBridgeStudio/releases/tag/v0.6.2-mac-resume.1) · [修正 PR](https://github.com/iancheng64-cmd/AgentBridgeStudio/pull/1)
 
 [繁體中文](README.md) · [English](README_EN.md)
 
 在 Mac 上與 Codex、Claude Code 對話，讓 Agent 處理**這台 Mac** 的檔案、命令、應用程式與網頁。模型 Runtime 與登入保留在你選擇的遠端主機，工作工具在本機執行。
 
-**版本 0.4.7 · Apple Silicon · macOS 13 或更新版本**
+**版本 0.6.2-mac-resume.1 · Apple Silicon · macOS 13 或更新版本**
 
 > 這是遠端 Runtime 用戶端。安裝後不用另外下載 Node.js、Python、Homebrew、Codex Mac 執行器、Computer Use MCP 或瀏覽器；第一次使用仍須填入可連線、已登入的遠端 Runtime，並授予 macOS 所需權限。它不包含免費 AI 帳號或離線模型。
+
+## 0.5.7：可執行任務的內建工具
+
+新增容錯檔案／內容搜尋、精準文字編輯、可追蹤命令、內建 Node 執行、任務進度保存、公開網頁讀取，以及 MCP 資源／提示範本。這些核心能力包在 App 內，無須另外下載工具。Codex 與 Claude 使用相同的 Mac 工具通道；一般模式仍會依操作請求授權，最高權限模式套用既有設定。
+
+直接描述工作即可。AI 可保存任務目標、步驟及下一個動作；停止後在原對話補充要求繼續。命令輸出有上限與查詢游標，停止／回合結束／斷線會取消該通道啟動的命令。資料夾搜尋遇到無權讀取的子目錄會繼續，並回報搜尋範圍不完整。
+
+[能力與限制](docs/AGENT_CAPABILITIES.md) 區分內建功能、已接通 MCP 和選用外部依賴。GitNexus 等第三方工具不隨此 DMG 安裝；若專案明確要求，需另外接通指定工具，不能用其他搜尋冒充。遠端原生帳戶與 macOS 權限仍須設定。
+
+## 0.5.6 穩定性修正
+
+最高權限不再受工作資料夾範圍限制，檔案讀取可指定任何絕對路徑。需要 root 的唯讀操作可透過 macOS 系統視窗輸入管理員密碼；不將密碼交給模型，不讓整個 App 長期以 root 執行。完整磁碟存取、SIP 與磁碟權限仍適用。
+
+未送出的文字與附件按對話保存，切換對話、正常關閉與重新啟動後可以繼續編輯。各 Agent 的模型及推理強度保留；雙 Agent 暫停後使用同一對話與有界歷史接續。
+
+停止後可在同一個對話輸入補充要求，優先恢復原生對話；若重開 App、換設備、目錄或沒有原生識別碼，使用本機文字上下文在同一個對話接續。恢復文字包含最初目標與最近進度，最多 24,000 字元；完整本機紀錄保留，過去的工具與附件不重播。停止在初始化階段也會解除忙碌狀態。
+
+登入未完成時顯示黃色狀態及輸入框旁的處理入口，保留草稿。朋友完成原生登入後，按「重新檢查登入」或再次發送即可重新查詢，下一回合重新載入原生憑證。查詢失敗與真正未登入分開；防止登入檢查期間重複 Enter 產生多個請求。
+
+長訊息分段顯示，長對話可查看前後訊息；完整文字仍可複製及匯出。串流文字合併更新，已完成的訊息不重複解析。對話改為本機檔案保存，只寫入變動的對話；舊紀錄成功遷移後才移除舊儲存鍵，關閉視窗會等候最後一次保存。
+
+## 0.5.0 新增
+
+- SSH 與 HTTPS/WSS 雙路徑：設定可選「自動／只用 SSH／只用 HTTPS」，共用 Codex 與 Claude Runtime。
+- 遠端 Gateway 安裝包（Windows x64、Apple Silicon Mac），內含 Node、WebSocket 套件、cloudflared；不用另裝這些相依工具。原生 AI CLI 與帳戶仍由遠端主機擁有者提供。
+- Claude 官方訂閱額度獨立查詢，5 小時／7 天及方案提供的分模型額度、更新時間、過期／錯誤狀態；API 模式不假造訂閱剩餘比例。
+- Claude 原生自動壓縮門檻下一回合生效，壓縮事件保存在對話；原生門檻可能比選項更早。
+- 斷線恢復目前選擇的連線，保留歷史，操作不自動重送。
+
+[HTTPS 設定](docs/networking/RELAY.md) · [Cloudflare Tunnel](docs/networking/CLOUDFLARE_TUNNEL.md) · [連線診斷](docs/networking/NETWORK_DIAGNOSTICS.md) · [Gateway 安裝](gateway/README.md)
+
+Mac 使用標準 HTTPS/WSS 443；Cloudflare Tunnel 所在的遠端設備仍需可用的 7844 出口。HTTPS 遠端命令通道未提供完整 PTY，完整 TUI 保留 SSH。功能與實測界線詳見 [發行驗收](docs/RELEASE_ACCEPTANCE.md)。
 
 ## 🏗️ 架構與實現原理 (Architecture & How It Works)
 
@@ -19,7 +54,7 @@ flowchart TD
         Core["本機執行核心 (Local Executor)"]
         
         subgraph Tools["本機工具箱 (Local Tools)"]
-            FS["檔案與 Shell (Workspace 沙盒)"]
+            FS["檔案與 Shell (依權限模式)"]
             CU["原生 Computer Use (Swift / AXUIElement)"]
             Browser["獨立 Playwright (Chromium 隔離無痕)"]
             MCPGateway["本機 MCP 通訊網關 (127.0.0.1 Loopback)"]
@@ -30,7 +65,7 @@ flowchart TD
     end
 
     subgraph Tunnel["🔒 加密通訊通道"]
-        SSH["SSH 反向端口轉發 (Reverse Loopback Tunnel)"]
+        SSH["SSH 或 WSS 反向工具通道"]
     end
 
     subgraph Remote["☁️ 遠端主機 (Remote Runtime)"]
@@ -39,20 +74,20 @@ flowchart TD
         Daemon <--> LLM
     end
 
-    UI <-- SSH 認證連線 --> Daemon
+    UI <-- SSH 或 HTTPS 配對 --> Daemon
     Daemon <-- 工具呼叫轉發 --> SSH --> Core
 ```
 
 ### 核心實現原理
 
 1. **遠端推理，憑證不落地 (Remote Runtime & Credential Isolation)**
-   * AI 模型的登入態、ChatGPT 帳號憑證、Anthropic API Key 與對話歷史完整保留在你的遠端工作站或伺服器。
-   * Mac 本機無需儲存任何雲端 API Key，遠端主機離線或斷開時本機絕無憑證殘留風險。
-   * 本機僅透過 macOS Keychain 支援的加密機制儲存連線用的 SSH 憑證。
+   * 原生 AI 登入憑證留在遠端 Runtime；App 在 Mac 保存自己的聊天歷史與附件。
+   * 自訂 API 模式輸入的金鑰只用於這次連線，不持久保存；斷線後需要重新輸入。
+   * SSH 連線憑證與 Relay 設備授權透過 macOS Keychain 支援的加密機制保存。
 
 2. **安全反向隧道 (Reverse Loopback Tunneling)**
    * App 透過安全的 SSH 連線與遠端主機握手，並驗證主機公鑰指紋以防止中間人攻擊 (MITM)。
-   * 透過 SSH 反向連接埠轉發 (Reverse TCP Forwarding) 將遠端工具請求安全回傳至本機。
+   * SSH 反向連接埠轉發或已配對的 WSS 通道將遠端工具請求回傳至本機。
    * 本機端點嚴格限制於 `127.0.0.1` 迴路，阻止任何來自外網或未授權局域網的非法存取。
 
 3. **零依賴全內建模組 (Self-Contained Native Subsystems)**
@@ -67,7 +102,7 @@ flowchart TD
 
 你可以選擇直接下載打包好的 DMG 執行，或透過 Git Clone 從原始碼直接執行。
 
-### 方式一：Git Clone 直接在任何電腦執行（推薦開發者）
+### 方式一：在 Mac 從原始碼執行（開發者）
 
 複製專案並執行內建的一鍵啟動腳本：
 
@@ -91,17 +126,13 @@ npm start
 
 ### 方式二：下載打包好的 DMG 安裝檔（免編譯）
 
-到這個儲存庫的 **[Releases](https://github.com/iancheng64-cmd/AgentBridgeStudio/releases)** 頁，下載最新版 `AgentBridge-Studio-0.4.7-arm64.dmg`。
+到這個儲存庫的 **[Releases](https://github.com/iancheng64-cmd/AgentBridgeStudio/releases)** 頁，下載最新版 `AgentBridge-Studio-0.5.6-arm64.dmg`。
 
 1. 打開 DMG，將 **AgentBridge Studio** 拖到 **Applications**。
 2. 從「應用程式」開啟 App；不要直接在 DMG 中執行。
-3. **若 macOS 出現安全性提示（無法打開／已損毀）**，可於終端機執行解除隔離：
-   ```sh
-   xattr -cr "/Applications/AgentBridge Studio.app"
-   ```
-   或前往「系統設定 → 隱私權與安全性」點選「仍要打開」。
-4. 到「設定 → 連線與 Agent」，新增遠端設備、填入 SSH 資訊，選擇 Codex 或 Claude Code。
-5. 選擇這台 Mac 的工作資料夾，連接 Runtime。首次連線需核對 SSH 主機指紋。
+3. 本發行檔尚未 Apple 公證；若 macOS 阻擋，先確認下載来源與校驗值，再依系統提示於「隱私權與安全性」處理。
+4. 到「設定 → 連線與 Agent」，新增遠端設備，選擇 Codex 或 Claude Code；填入 SSH 資訊，或配對 HTTPS Gateway。
+5. 選擇這台 Mac 的工作資料夾，連接 Runtime。SSH 首次連線需核對主機指紋；HTTPS 使用遠端產生的一次性配對碼。
 6. 如需看螢幕、點擊或輸入，到「電腦與工具」請求並檢查「輔助使用」及「螢幕錄製」權限。
 
 詳細步驟及故障排除：[安裝指南](docs/INSTALLATION.md)。
@@ -123,7 +154,7 @@ npm start
 
 ## 遠端主機條件
 
-- 可由 Mac 存取的 SSH 服務及正確登入資訊。可用區域網路、既有 VPN 或其他安全 SSH 連線方式；一般 Runtime 連線不強制安裝 Tailscale。
+- 可由 Mac 存取的 SSH 服務及正確登入資訊，或已部署／配對的 HTTPS Gateway。可用區域網路、既有 VPN 或其他安全 SSH 連線方式；一般 Runtime 連線不強制安裝 Tailscale。
 - Codex：主機已安裝並登入 **Codex 0.160.0**，與 App 內建執行器配對。其他版本不保證 Mac 工具可用。
 - Claude：主機已安裝可使用的原生 Claude Code CLI 與 Node.js 通訊橋，並完成帳號登入或 API provider 設定。
 - 該主機必須保持開機且可連線；主機離線時無法執行 AI 工作。
@@ -170,3 +201,5 @@ npm run package:public
 ## 授權
 
 AgentBridge 原始碼採 [MIT](LICENSE)。內建元件各自保留原始授權與告知，見 [第三方元件](THIRD_PARTY_NOTICES.md)。本專案非 OpenAI、Anthropic 或瀏覽器供應商的官方產品。
+
+開啟 App 直接載入本機聊天紀錄，不必解鎖連線密碼。自動連線預設關閉，舊版開啟的設定也不會自動沿用；手動連線時若要讀取已保存的 SSH／HTTPS 憑證，macOS 仍可能要求解鎖鑰匙圈。

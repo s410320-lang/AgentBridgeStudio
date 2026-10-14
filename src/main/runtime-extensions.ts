@@ -1,5 +1,7 @@
+import {coreRuntimeInstructions} from './agent-core-tools';
 import fs from "node:fs/promises";
 import path from "node:path";
+import {randomUUID} from "node:crypto";
 export interface RuntimeExtensionItem {
   id: string; name: string; kind: "skill" | "plugin" | "mcp";
   description?: string; path?: string; enabled: boolean; source: string;
@@ -21,14 +23,17 @@ export function localExtensionCatalog(value: RuntimeExtensionCatalog): RuntimeEx
 }
 export async function writeExtensionManifest(file: string, catalog: RuntimeExtensionCatalog) {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = file + ".tmp";
-  await fs.writeFile(temporary, JSON.stringify({ source: "AgentBridge Mac extension inventory", generatedAt: new Date().toISOString(), ...catalog }, null, 2), { mode: 0o600 });
-  await fs.rename(temporary, file);
+  const temporary = file + "." + randomUUID() + ".tmp";
+  try{
+    await fs.writeFile(temporary, JSON.stringify({ source: "AgentBridge Mac extension inventory", generatedAt: new Date().toISOString(), ...catalog }, null, 2), { mode: 0o600 });
+    await fs.rename(temporary, file);
+  }finally{await fs.rm(temporary,{force:true});}
 }
 /** Describes actual routes and discoverable local capabilities, without overriding the user's task. */
 export function macRuntimeInstructions(cwd: string, manifestPath: string, toolNames: string[], catalog: RuntimeExtensionCatalog) {
   const enabledSkills = catalog.items.filter(item => item.kind === "skill" && item.enabled && item.path).length;
   return [
+    coreRuntimeInstructions,
     "You are the Codex assistant in AgentBridge Studio. Respond in the user's language (Traditional Chinese by default).",
     "The user describes tasks in normal language. Select and use the available tools to complete authorized work; do not require the user to name MCP servers, spell tool names, or manually write tool calls.",
     `All shell, patch, filesystem, and view_image operations in this conversation are bound to the user's Mac executor. The selected Mac working directory is ${JSON.stringify(cwd)}. The Runtime machine supplies authentication and model orchestration only; never assume its local filesystem, shell, browsers, or desktop is the execution target.`,

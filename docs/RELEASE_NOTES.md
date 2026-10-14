@@ -1,16 +1,112 @@
-# Unreleased
+# 0.6.2-mac-resume.1（修正預覽版）
 
-- Fix Codex 0.160.0 conversations failing with "Runtime 尚未載入 Mac 工具；請重新連線。" after reconnecting and resuming an unloaded thread. Before starting a turn, verify the current Mac route on an ephemeral thread when the resumed thread has no selected environment, then release that probe and explicitly bind the original turn to this Mac.
-- Apply the same verification to background discussion turns. Foreign environments, exposed remote tools, failed Mac tools and unverifiable environment selections still block inference.
-- This source fix requires a rebuilt App. The existing 0.4.7 Release DMG is unchanged.
+- 修正 Codex 0.160.0 在重連或租用新 Runtime 程序後恢復舊對話時，誤判「Runtime 尚未載入 Mac 工具」。在推論前以暫存對話驗證目前的 Mac 工具，清理驗證對話後將原對話回合綁定至目前的 Mac 執行環境。
+- 一般對話與背景討論共用驗證流程；遠端工具暴露、未知環境及真正的 Mac 工具錯誤仍阻止執行。
+- 基於 0.6.1 建置 Apple Silicon 修正預覽版；官方 0.6.1 發行檔維持原樣。
 
-# 0.4.7
+# 0.6.1 多任務並行執行
 
-- Self-contained Apple Silicon DMG: Electron/Node, Codex 0.160.0 executor, native computer helpers and version-matched browser.
-- All browser launch paths use the bundled executable. No Chrome install or first-launch browser download.
-- Default optional HTTP MCP exposure is local-only; explicit Tailnet exposure remains supported. Unauthenticated LAN/public exposure stays blocked.
-- Existing provider preferences and user data remain local and unchanged.
-- Public source packaging excludes private machine evidence, reference notes, dependencies and build outputs.
-- README, installation instructions, third-party notices, reproducible build steps and GitHub draft release workflow.
+- 新增同時執行多個任務：每個對話向 TaskRuntimePool 租用獨立 Runtime 進程，上限 8 個並行任務，期滿自動歸還。
+- 新增混用 Codex 與 Claude Code 並行：兩個 Agent 各自維護連線與任務池，切換對話不再需要停止另一邊的工作。
+- 重構單一 `working` 全域狀態為 `works` Map（以 requestId 索引），事件路由、停止、核准、TTS 全部以 requestId 定位，不再互相搶模型。
+- 修正工具結果索引改用 `messageId:itemId` 複合鍵，多任務並行時工具截圖與輸出不會再寫進別的對話。
+- 修正側邊欄與對話選單的執行中狀態改為逐對話判斷；刪除對話按鈕在該對話有工作進行時停用。
+- 修正切換 Agent、連線與重新連線的阻擋條件，改為只阻擋同一 Agent 的工作，不再誤擋另一個 Agent。
 
-The locally built DMG is ad-hoc signed and not Apple notarized. The repository also includes an opt-in Developer ID and notarization build path; its success must be verified using actual maintainer credentials before claiming a notarized release.
+# 0.6.0 ChatGPT App 功能對齊（A/B 兩批）
+
+- 新增編輯已送出訊息並重送：保留到該則為止的上下文，後續回覆移除。
+- 新增在目前對話中尋找（⌘F）：比對訊息文字與工具標題，↑↓ 切換結果，點擊跳轉並高亮。
+- 新增朗讀回覆：每則回覆可朗讀／停止（zh-TW 語音），並可在設定開啟回覆結束自動朗讀。
+- 新增從任一訊息建立分支對話，沿用先前上下文，新對話插到列表頂端。
+- 新增臨時對話（⌘T）：不進入歷史與側邊欄；對話選單可一鍵保留。
+- 新增自訂指令（設定 → 一般）：以使用者訊息區塊注入 Codex 與 Claude 兩個後端。
+- 新增提示範本（⇧⌘U）：新增／刪除／點擊插入輸入框，範本存在本機。
+- 新增多視窗（⌘U）：經由 IPC 建立第二個視窗；已有兩視窗時拒絕以保護歷史紀錄寫入。
+- 新增桌面通知：回覆結束且視窗無焦點時發出 macOS 通知，可在設定開關。
+- 新增訊息書籤：任一訊息可加入／移除書籤，標記訊息左側顯示標記色。
+- 新增匯出對話為 Markdown，以及執行中插入提示詞（0.5.8 起功能，一併隨版）。
+
+# 0.5.7 Agent 核心工具與失敗恢復
+
+- 修正檔名搜尋遇到受保護子目錄就中斷；保留可讀結果，列出略過範圍与是否完整。
+- 新增含行號的文字內容搜尋，限制總讀取量、單檔大小及結果數，略過二進位檔與不可讀檔。
+- 新增精準文字編輯：唯一原文匹配、選用 SHA-256 衝突檢查、原子替換及原有檔案執行權限保留。既有寫入工具也保留檔案模式。
+- 新增命令啟動／查詢／標準輸入／停止；限制並行數、時間與輸出量，停止／回合結束／斷線清理程序群組，避免殘留背景程序。
+- 支援包內 Node 執行 JavaScript，不需在使用者 Mac 額外安裝 Node。
+- 任務進度以 taskId 區隔，原子保存並校驗版本，跨連線可讀；避免不同任務互相覆蓋。
+- 內建程式開發、研究、電腦操作與恢復指南，以及實際工具狀態查詢；Codex／Claude 都載入共用核心指引。
+- MCP 擴充支援資源、資源範本及提示範本；修正資源型伺服器沒有工具清單時被誤判失敗。
+- 支援有上限、限時且不帶登入 Cookie 的公開網頁文字讀取。搜尋與互動／登入網站使用包內瀏覽器。
+
+這些改善不代表能繞過 macOS 權限、帳戶額度或任何外部服務限制；不宣稱與 Codex／ChatGPT 所有雲端專屬功能完全相同。
+
+# 0.5.6 完整檔案權限與發布檢查修正
+
+- 最高權限真正解除 Mac 檔案工具的工作資料夾限制；初次連線及連線中升級權限均套用，Codex／Claude 共用。一般模式繼續限制在明確允許的目錄。
+- 修正 `/` 根目錄不包含子路徑的判斷；最高權限支援 macOS 別名路徑，如 `/var`。
+- 檔案列出／資訊／文字讀取提供管理員讀取選項，由 macOS 系統密碼視窗授權。固定唯讀程序只接收動作與路徑，不接受模型提供的 shell 指令、不接收或保存管理員密碼。取消會取消尚待處理的授權。
+- App 最高權限、macOS 完整磁碟存取、Unix 權限、SIP／唯讀系統磁碟分開處理。需要管理員授權與 macOS 拒絕的錯誤提供不同說明，不宣稱 root 可繞過隱私／系統保護。
+- 未送出的文字及附件草稿依對話分開保存；新對話、切換對話、重新啟動及關閉前保存皆可恢復。草稿採獨立原子檔案，不佔聊天 localStorage，也不自動送出。
+- 記住每個 Agent 的模型與推理程度；重新連線時核對實際可用清單，不把不支援的旧模型當成有效選擇。
+- 雙 Agent 停止或完成後可在同一個對話繼續，使用已保存的最初目標及近期文字，不重播歷史工具與附件。
+- 發布就緒狀態見 [PUBLISH_READINESS.md](PUBLISH_READINESS.md)。測試通過不代表朋友登入、公開 Tunnel、跨機首次安裝或 Apple 公證已完成。
+
+# 0.5.5 停止後在原對話接續
+
+- Codex 初始化時停止不再卡住忙碌狀態，後續訊息可送出。
+- Claude 中斷通知延至原生程序恢復完成後；避免介面提前開放下一則訊息。
+- 停止／重連保留目前對話與部分文字；相同環境恢復原生對話，變更設備／目錄仍在同一個本機對話使用歷史文字接續。
+- 接續文字保留最初目標與近期進度，最多 24,000 字元／24 則；完整歷史仍留在本機。過去工具與附件不重播。
+- 修正停止後立刻繼續時的工具清單暫存檔寫入競爭。
+- 同一個執行環境恢復原生對話；重開 App 或變更執行環境後，仍在原視窗使用本機文字接續，避免旧原生工具綁定使下一回合失敗。
+
+# 0.5.4 登入恢復與發送狀態
+
+- 通道已連線、原生未登入、登入待確認、Mac 工具未就緒與模型已就緒分開顯示，未登入不顯示可用綠燈。
+- 未登入時發送保留草稿，顯示輸入框旁的處理入口，不再跳回設定。
+- 朋友登入後重新檢查或再次發送會查詢原生狀態；下一回合重啟自己的 Claude 程序以載入新憑證，不要求重開 App。
+- 原生查詢失敗不沿用舊的已確認狀態；額度失敗仍不等於登入失敗或剩餘為零。
+- 前後端防止登入查詢期間的重複發送；SSH 與 HTTPS/WSS 路徑保留。
+
+# 0.5.3 SSH 啟動與 Claude 官方登入修復
+
+- 預設 Codex 指令不在 SSH PATH 時，檢查獨立相容安裝、Codex App 與 ChatGPT App 內建執行檔。
+- 官方模式保留原生 CLAUDE_CODE_OAUTH_TOKEN；自訂 API 憑證仍隔離，OAuth Token 僅留在 Runtime 記憶體。
+- setup-token 僅支援模型請求，額度查詢明確顯示不支援，不借用其他已存帳號的額度。
+- 明確指定的執行檔路徑不會自動改用另一套安裝。
+- 保留 Windows 啟動參數、登入隔離與精確版本驗證。找到桌面版不代表其版本已支援 Mac 工具。
+
+# 0.5.2 額度讀取與對話恢復
+
+- 修正非互動 SSH 的 Mac CLI 尋找路徑，並避免把 Codex 不存在誤報成 bash 不存在；Windows 補讀選定使用者的持久 Claude 目錄設定，不讀取其他使用者。
+- Claude 額度讀取對齊原生 macOS 鑰匙圈優先順序、使用者帳號及自訂設定資料夾命名；Windows／Linux 沿用原生憑證檔位置，並支援原生独立 secure-storage 目錄及空值預設語義。
+- 額度查詢使用 Claude 程序實際設定的資料夾；查詢失敗不再長時間快取，登入探測失敗區分為未確認。
+- 每台設備可保存 Claude 登入設定目錄；工作資料夾另行設定。原生登入、額度與壓縮使用同一個設定環境，介面顯示實際目錄。
+- Runtime 狀態更新會重新查詢原生登入，不要求為了更新狀態先關閉整個 App；更新不重設已選推理程度。
+- 原生 Runtime 的重試通知顯示為活動，不會讓後續成功回覆被標成失敗。
+- 帳戶額度耗盡、頻率限制、登入、模型、上下文及服務錯誤分開；沒有原因時不猜測額度耗盡。
+- 遠端對話不存在時保留本機歷史；使用者下一次送出時以最近、最多 24,000 字元的文字紀錄接續。歷史工具與附件不自動重播；缺少的附件需重加。
+- 查詢通道失敗會顯示可處理的訊息，保留先前快照並標示過期；不是剩餘為零。
+
+Gateway 0.5.0 協定仍相容，不需要重裝 Gateway。官方 OAuth 額度介面不是公開版本化 API，可能因登入權限、網路、服務限流或回應格式變更而不可用。App 不繞過帳戶限制，也不保證所有服務永不失敗。
+
+# AgentBridge Studio 0.5.1
+
+修正大量文字的介面阻塞：線性 Markdown 解析、長訊息／對話分頁、既有訊息快取、合併串流更新；聊天保存改為只寫入變動對話的本機原子檔案。舊聊天資料確認成功遷移後才移除舊鍵，關閉視窗等候最後保存。
+
+受控 headless 正式前端驗收：1,000 則訊息、單則約 19 萬字元、貼入 4 萬字元、歷史換頁與重新載入；另測舊紀錄遷移及串流／關閉保存。詳細結果見 RELEASE_ACCEPTANCE。SSH 與 HTTPS/WSS 協定維持相容，0.5.0 Gateway 可繼續使用。
+
+# AgentBridge Studio 0.5.0
+
+新增 Codex／Claude 共用的 HTTPS/WSS Gateway，保留 SSH，提供自動、只用 SSH、只用 HTTPS 三種方式。配對碼一次有效，Mac 加密保存設備授權，連線 token 不放 URL 或 log。遠端 Windows x64／Mac arm64 Gateway 包內含 Node、ws 與 cloudflared。
+
+Claude 官方訂閱額度新增獨立查詢、5 小時／7 天及可用分模型快照、更新時間與錯誤／過期提示；API 模式不冒充訂閱。自動壓縮設定送到原生 Runtime，下一回合改門檻可生效，原生壓縮事件保存在對話。原生較早門檻仍優先。
+
+斷線保留工作歷史，恢復連線不重送工具／指令。HTTPS 檔案傳输為串流、64 MiB 上限，不覆蓋既有同名檔。HTTPS 命令通道提供 stdin/stdout/stderr，完整 PTY／TUI 保留 SSH。
+
+**實測：**TypeScript／前端建置、113 項 Node 測試（112 通過、1 原生選用測試跳過）、5 項公開封裝測試，以及真實 TLS/WSS 受控 Runtime 串流、Mac MCP 回傳、停止／斷線清理、配對／撤銷／過期、檔案傳輸均通過。額度數字與壓縮事件測試採受控原生協定 fixture，不是消耗真實帳戶額度的長上下文測試。
+
+**發布限制：**Apple Silicon Mac DMG 為 ad-hoc signed、尚未 Apple 公證；跨 Mac 的 Gatekeeper／macOS 13 與 Windows 執行環境仍須實機驗收。公開 Tunnel 網址尚未設定，因此未驗證校園或跨網路部署。Mac 免另裝本機依賴；远端仍需原生 AI CLI、相容版本與登入。Cloudflare Tunnel 的遠端出口需 7844；Mac 用 HTTPS/WSS 443。詳見 networking 文件及 RELEASE_ACCEPTANCE。
+
+開啟 App 直接載入本機聊天紀錄，不必解鎖連線密碼。自動連線預設關閉，舊版開啟的設定也不會自動沿用；手動連線時若要讀取已保存的 SSH／HTTPS 憑證，macOS 仍可能要求解鎖鑰匙圈。

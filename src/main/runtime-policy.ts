@@ -22,7 +22,7 @@ export const runtimeIsolationOverrides: Record<string, unknown> = {
 export function isolatedRuntimeArgs() {
   return Object.entries(runtimeIsolationOverrides).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]);
 }
-export function macThreadConfig(config: any, server: { name: string; url: string; token: string; environmentId?: string } | undefined) {
+export function macThreadConfig(config: any, server: { name: string; url: string; token: string; environmentId?: string } | undefined, autoCompactPercent?: number) {
   if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Runtime 未提供可驗證的設定，無法隔離遠端工具。");
   const servers = config.mcp_servers || {};
   if (typeof servers !== "object" || Array.isArray(servers)) throw new Error("Runtime MCP 設定格式無效。");
@@ -41,6 +41,12 @@ export function macThreadConfig(config: any, server: { name: string; url: string
     startup_timeout_sec: 20, tool_timeout_sec: 180,
   };
   overrides.mcp_servers = mcpServers;
+  if (typeof autoCompactPercent === "number" && Number.isFinite(autoCompactPercent)) {
+    const pct = Math.max(10, Math.min(95, Math.round(autoCompactPercent)));
+    const contextWindow = Number(config?.model_context_window) || 128000;
+    overrides.model_auto_compact_token_limit = Math.round(contextWindow * (pct / 100));
+    overrides.model_auto_compact_token_limit_scope = "total";
+  }
   return overrides;
 }
 export function needsMacEnvironmentPreflight(thread: any, environmentId: string) {

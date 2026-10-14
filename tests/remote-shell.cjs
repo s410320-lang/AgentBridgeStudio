@@ -21,3 +21,6 @@ test('automatic and explicit connections share the same existing chat and usage 
  assert.equal(connectionPlatformIdentity('posix','windows'),'posix');
  assert.throws(()=>connectionPlatformIdentity('auto','unknown'),/未回報/);
 });
+test('a bash diagnostic for a missing Codex executable does not falsely claim bash itself is absent',()=>{
+ const message='/bin/bash: line 1: exec: codex: not found';assert.doesNotMatch(remoteLaunchError('posix',message).message,/主機無法執行 bash/);assert.match(remoteLaunchError('posix',message).message,/codex/);
+});

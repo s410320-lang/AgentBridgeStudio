@@ -1,14 +1,39 @@
 # AgentBridge Studio
+0.6.2-mac-resume.1 fix preview, based on 0.6.1: repairs Mac tool verification when resuming old Codex conversations after reconnecting to the Windows Runtime. Existing parallel-task features are retained.
+
+[Download this fix preview](https://github.com/s410320-lang/AgentBridgeStudio/releases/tag/v0.6.2-mac-resume.1) · [Fix PR](https://github.com/iancheng64-cmd/AgentBridgeStudio/pull/1)
 
 [English](README_EN.md) · [繁體中文](README.md)
 
 Chat with OpenAI Codex and Anthropic Claude Code on your Mac, empowering agents to operate files, shell commands, native applications, and browsers on **this Mac**. Model runtime execution and login credentials remain on your chosen remote host, while operational tools execute locally on your Mac.
 
-**Version 0.4.7 · Apple Silicon · macOS 13 or later**
+**Version 0.6.2-mac-resume.1 · Apple Silicon · macOS 13 or later**
 
 > **Note:** This is a remote runtime client. You do not need to install Node.js, Python, Homebrew, Codex Mac executors, Computer Use MCP servers, or browsers to get started. Initial use requires connecting to a reachable, authenticated remote runtime and granting required macOS system permissions. This application does not include free AI accounts or offline models.
 
 ---
+
+## 0.5.7 built-in agent tools
+
+The app now bundles tolerant filename/content search, conflict-checked text editing, tracked shell commands, bundled Node execution, durable task checkpoints, public text-page fetching, and MCP resource/prompt adapters. Core tools require no additional download. Both Codex and Claude use the Mac execution route and existing permission settings.
+
+Search reports skipped inaccessible directories instead of discarding readable results. Checkpoints use separate task IDs and revision checks. Owned commands are bounded and cancelled on Stop, turn completion or disconnect. See [capabilities and limits](docs/AGENT_CAPABILITIES.md). Third-party project requirements such as GitNexus require a configured external integration; built-in search does not impersonate them. Native account login and macOS permissions still apply.
+
+## Stability in 0.5.6
+
+Full access removes workspace-only file restrictions. Read-only operations requiring root can request native macOS administrator authorization, without passing passwords to the model or running the whole App as root. Full Disk Access, SIP and filesystem permissions remain applicable.
+
+Unsent text and attachments persist per conversation across navigation and normal restarts. Model and reasoning preferences persist per agent. Two-agent continuation reuses the same conversation with bounded prior context.
+
+Long messages and conversation history are paged without discarding text. Streaming updates are batched and completed message bodies are memoized. Conversations use atomic local files; the legacy key is removed only after a successful migration. Closing waits for the final save.
+
+## New in 0.5.0
+
+SSH and paired HTTPS/WSS transports support both providers. Choose Auto, Direct SSH, or HTTPS Relay. The Windows x64 and macOS arm64 Gateway archives bundle Node.js, ws, and cloudflared; native AI CLIs and authentication remain prerequisites on the Runtime host. The Mac DMG needs no separate local tool downloads.
+
+Claude subscription quota is queried on its Runtime host, with 5-hour / 7-day windows when provided, timestamps and explicit unavailable/stale states. API billing is not represented as subscription quota. Native auto-compaction changes apply on the next resumed turn; only native compact events count as completion. Disconnected work is preserved and never automatically replayed.
+
+See [Relay setup](docs/networking/RELAY.md), [Tunnel setup](docs/networking/CLOUDFLARE_TUNNEL.md), and [acceptance boundaries](docs/RELEASE_ACCEPTANCE.md). Client traffic uses HTTPS/WSS 443; the cloudflared host also needs 7844 egress. HTTPS command streaming does not provide a PTY; full interactive TUI remains available through SSH.
 
 ## 🏗️ Architecture & How It Works
 
@@ -21,7 +46,7 @@ flowchart TD
         Core["Local Execution Core (Local Executor)"]
         
         subgraph Tools["Bundled Local Tools"]
-            FS["Files & Shell (Workspace Sandbox)"]
+            FS["Files & Shell (Permission Mode)"]
             CU["Native Computer Use (Swift / AXUIElement)"]
             Browser["Isolated Playwright (Chromium Sandbox)"]
             MCPGateway["Local MCP Gateway (127.0.0.1 Loopback)"]
@@ -32,7 +57,7 @@ flowchart TD
     end
 
     subgraph Tunnel["🔒 Encrypted Transport"]
-        SSH["SSH Reverse Port Forwarding (Reverse Loopback Tunnel)"]
+        SSH["SSH or paired WSS reverse tool channel"]
     end
 
     subgraph Remote["☁️ Remote Host (Remote Runtime)"]
@@ -41,20 +66,20 @@ flowchart TD
         Daemon <--> LLM
     end
 
-    UI <-- Authenticated SSH Connection --> Daemon
+    UI <-- SSH or paired HTTPS --> Daemon
     Daemon <-- Tool Call Dispatch --> SSH --> Core
 ```
 
 ### Core Implementation Principles
 
-1. **Remote Reasoning with Zero Credential Leakage (Zero-Knowledge Runtime)**
-   * AI logins, ChatGPT account tokens, and Anthropic API keys remain entirely on your remote server/workstation.
-   * Your Mac does not store any third-party AI cloud credentials. If the remote host is disconnected or powered off, no cloud credential risks remain on the Mac.
-   * SSH connection credentials on Mac are encrypted with macOS Keychain support.
+1. **Remote Runtime and Credential Storage**
+   * Native AI login credentials stay on the Runtime host; the Mac App saves its own conversation history and attachments.
+   * A custom API key entered for a connection is not persisted and must be entered again after disconnection.
+   * SSH credentials and Relay device authorizations are encrypted with macOS Keychain support.
 
 2. **Secure Reverse Loopback Tunneling**
    * The app initiates a secure SSH handshake with the remote host and verifies the SSH host fingerprint to prevent Man-In-The-Middle (MITM) attacks.
-   * Uses SSH Reverse Port Forwarding to securely route tool calls from the remote agent back to the local Mac.
+   * Uses SSH reverse forwarding or the paired WSS channel to route tool calls back to the local Mac.
    * Local listeners strictly bind to `127.0.0.1` (loopback only), completely preventing unauthenticated access across local networks or the internet.
 
 3. **Zero-Dependency Bundled Native Subsystems**
@@ -95,18 +120,13 @@ npm start
 
 ### Option 2: Download Packaged DMG (No Build Required)
 
-Go to the **[Releases](https://github.com/iancheng64-cmd/AgentBridgeStudio/releases)** page and download `AgentBridge-Studio-0.4.7-arm64.dmg`.
+Go to the **[Releases](https://github.com/iancheng64-cmd/AgentBridgeStudio/releases)** page and download `AgentBridge-Studio-0.5.6-arm64.dmg`.
 
 1. Open the DMG and drag **AgentBridge Studio** to **Applications**.
 2. Launch the app from `/Applications`; do not run directly inside the DMG.
-3. **If macOS displays a security prompt ("App is damaged" or "Unidentified Developer")**:
-   Run this one-liner in Terminal to clear the quarantine flag:
-   ```sh
-   xattr -cr "/Applications/AgentBridge Studio.app"
-   ```
-   Or navigate to **System Settings → Privacy & Security** and click **Open Anyway**.
-4. Go to **Settings → Connections & Agents**, add your remote host details (SSH host, user, port), and choose Codex or Claude Code.
-5. Select a workspace folder on your Mac and connect. Verify the SSH host fingerprint on first connection.
+3. This release is not Apple notarized. If macOS blocks opening it, verify the download source and checksum before following the system's Privacy & Security instructions.
+4. Go to **Settings → Connections & Agents**, choose Codex or Claude Code, and enter SSH details or pair an HTTPS Gateway.
+5. Select a workspace folder on your Mac and connect. First-time SSH requires fingerprint verification; HTTPS uses a one-time code generated on the Runtime host.
 6. Under **Computer & Tools**, check and grant macOS **Accessibility** and **Screen Recording** permissions.
 
 For complete setup instructions, see the [Installation Guide](docs/INSTALLATION.md).
@@ -130,7 +150,7 @@ For complete setup instructions, see the [Installation Guide](docs/INSTALLATION.
 
 ## ☁️ Remote Host Prerequisites
 
-- **SSH Access**: Reachable SSH server via LAN, Tailscale, or VPN.
+- **SSH Access**: Reachable SSH server via LAN, Tailscale, or VPN, or a paired HTTPS Gateway.
 - **Codex Host**: Must have `@openai/codex@0.160.0` installed and signed in (`npm install -g @openai/codex@0.160.0 && codex login`).
 - **Claude Host**: Must have Claude Code CLI installed and signed in (`npm install -g @anthropic-ai/claude-code && claude login`).
 - The remote machine must remain online while tasks are active.
@@ -165,3 +185,5 @@ For release signing, notarization, and verification pipelines, refer to [Releasi
 ## 📄 License
 
 AgentBridge Studio is open-source under the [MIT License](LICENSE). Bundled third-party components retain their respective licenses, detailed in [Third-Party Notices](THIRD_PARTY_NOTICES.md). This project is not officially affiliated with OpenAI, Anthropic, or browser vendors.
+
+Opening the App loads local conversation history without unlocking connection credentials. Auto-connect is off by default, including upgrades from earlier releases. Connecting with a saved SSH password or HTTPS pairing may still require the macOS Keychain prompt.

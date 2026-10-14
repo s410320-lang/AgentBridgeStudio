@@ -4,7 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { RuntimePlatform } from './host-platform';
 export type { RuntimePlatform } from './host-platform';
 export function remoteLaunchError(platform:'windows'|'posix', message:string) {
-  if (platform === 'posix' && /(?:^|[\s'"\/])bash(?:['"\s:]|$)/i.test(message)) {
+  if (platform === 'posix' && /(?:bash:\s*(?:command not found|not found)|(?:^|\s)['"]?bash['"]?\s+(?:is not recognized|not found)|^['"]bash['"]\s+\uFFFD|(?:cannot|failed to|unable to) (?:find|execute|spawn).*?\bbash\b)/i.test(message)) {
     return new Error('主機無法執行 bash。請將「主機系統」改為自動辨識；Windows 設備也可選擇 Windows。macOS／Linux 請確認已安裝 bash。');
   }
   if (message.includes('\uFFFD')) return new Error('遠端啟動失敗，主機回傳的文字編碼無法辨識。請使用自動辨識主機系統，並確認執行檔可由 SSH 執行。');

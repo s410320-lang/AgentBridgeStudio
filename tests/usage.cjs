@@ -1,5 +1,5 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');
-const {rateLimitSummary,mergeRateLimitSummary,sharedQuotaChange,tokenCount,tokenDelta,updateUsage,usageTotals}=require('../dist-main/runtime-usage');
+const {rateLimitSummary,mergeRateLimitSummary,claudeRateLimitSummary,mergeClaudeRateLimitSummary,sharedQuotaChange,tokenCount,tokenDelta,updateUsage,usageTotals}=require('../dist-main/runtime-usage');
 test('quota uses all limit buckets, clamps percentages and never exposes account identity or makes missing data zero',()=>{
  const quota=rateLimitSummary({accountId:'private',accessToken:'private',rateLimits:{primary:{usedPercent:999}},rateLimitsByLimitId:{codex:{limitName:'Codex',primary:{usedPercent:21.2,windowDurationMins:300,resetsAt:2000},secondary:{usedPercent:101}},other:{primary:{}}}},123);
  assert.equal(quota.updatedAt,123);assert.equal(quota.buckets.length,2);assert.equal(quota.buckets[0].primary.remainingPercent,78.8);assert.equal(quota.buckets[0].secondary.remainingPercent,0);assert.equal(quota.buckets[1].primary,null);assert.ok(!JSON.stringify(quota).includes('private'));assert.equal(rateLimitSummary(null).available,false);
@@ -15,6 +15,12 @@ test('sparse notifications preserve other buckets, both windows and nullable met
 });
 test('quota comparison never attributes a reset or decreasing account counter to the app',()=>{
  const q=(used,reset)=>rateLimitSummary({rateLimits:{primary:{usedPercent:used,resetsAt:reset}}});assert.equal(sharedQuotaChange(q(12,2000),q(14,2000))[0].usedPercentChange,2);assert.equal(sharedQuotaChange(q(12,2000),q(1,3000))[0].usedPercentChange,null);assert.equal(sharedQuotaChange(q(12,2000),q(1,2000))[0].usedPercentChange,null);assert.equal(sharedQuotaChange(q(12,null),q(14,null))[0].usedPercentChange,null);
+});
+test('Claude quota names and retains the 5-hour and 7-day windows across sparse events',()=>{
+ const five=claudeRateLimitSummary({rateLimitType:'five_hour',status:'allowed',utilization:0.2,resetsAt:2000},100);
+ assert.equal(five.windows[0].name,'5 小時額度 (5 hour limit)');assert.equal(five.windows[0].windowDurationMins,300);assert.equal(five.windows[0].remainingPercent,80);
+ const merged=mergeClaudeRateLimitSummary(five,{rateLimitType:'seven_day',status:'allowed',utilization:0.4,resetsAt:3000},200);
+ assert.deepEqual(merged.windows.map(window=>window.id),['five_hour','seven_day']);assert.equal(merged.windows[0].remainingPercent,80);assert.equal(merged.windows[1].remainingPercent,60);
 });
 test('turn token updates replace duplicate notifications, preserve unknown counts and exclude incomplete records from total',()=>{
  const records=[{requestId:'a',agent:'codex',hostKey:'fixture',model:'model',startedAt:1,status:'completed'},{requestId:'b',agent:'codex',hostKey:'fixture',model:'model',startedAt:2,status:'cancelled'}];

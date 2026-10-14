@@ -55,3 +55,14 @@ test('unexpected executor termination invokes fail-closed hook; intentional stop
   const stopped = new LocalExecServer(installation, () => assert.fail('intentional shutdown is not unexpected'));
   await stopped.start(root); stopped.stop();
 });
+
+test('a resumed Mac environment can rebind its historical identifier only after canonical cwd verification',async()=>{
+ const executor=new LocalExecServer(installation,()=>{}),calls=[];
+ const old='agentbridge-mac-11111111-2222-4333-8444-555555555555';
+ try{await executor.start(root);const rpc={request:async(method,params)=>{calls.push({method,params});return method==='environment/info'?{cwd:pathToFileURL(fs.realpathSync(root)).href,shell:{name:'zsh',path:'/bin/zsh'}}:{};}};
+ await executor.register(rpc,executor.localUrl,old);assert.equal(executor.environmentId,old);assert.equal(calls[0].params.environmentId,old);
+ await executor.register(rpc,executor.localUrl,old);assert.equal(calls.filter(c=>c.method==='environment/add').length,1,'repeated resume reuses the verified registration');
+ await assert.rejects(executor.register(rpc,executor.localUrl,'foreign-runtime'),/識別碼/);
+ const current=executor.environmentId;await assert.rejects(executor.register({request:async method=>method==='environment/info'?{cwd:'file:///wrong',shell:{name:'zsh',path:'/bin/zsh'}}:{}},executor.localUrl,'agentbridge-mac-66666666-7777-4888-9999-000000000000'),/不符合此 Mac/);assert.equal(executor.environmentId,current);
+ }finally{executor.stop();}
+});

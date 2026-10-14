@@ -18,6 +18,9 @@ test('policy disables literal original MCP names and binds the authenticated Mac
   assert.equal(config.mcp_servers.composio.url, 'http://127.0.0.1:9/mcp');
   assert.equal(config.mcp_servers.mac.environment_id, 'mac-environment');
   assert.equal(config['features.hooks'], false); assert.equal(config['features.plugins'], false);
+  const compactConfig = macThreadConfig({ mcp_servers: {}, model_context_window: 200000 }, undefined, 70);
+  assert.equal(compactConfig.model_auto_compact_token_limit, 140000);
+  assert.equal(compactConfig.model_auto_compact_token_limit_scope, 'total');
   validateMacMcpInventory([{name:'ordinary',runtimeStatus:'disabled',tools:{}},{name:'mac',tools:{mac_fs_read:{}}}], 'mac');
   assert.throws(() => validateMacMcpInventory([{name:'ordinary',runtimeStatus:'connected',tools:{}}]), /非 Mac/);
   assert.throws(() => validateMacMcpInventory([{name:'ordinary',runtimeStatus:'disabled',tools:{},resources:[{uri:'file:///secret'}]}]), /非 Mac/);

@@ -1,6 +1,6 @@
 {
   "name": "agentbridge-studio",
-  "version": "0.4.7",
+  "version": "0.6.2-mac-resume.1",
   "description": "A self-contained macOS desktop client for remote Codex and Claude runtimes, with bundled local computer and browser tools.",
   "author": "AgentBridge Studio",
   "license": "MIT",
@@ -29,23 +29,24 @@
     "react-dom": "19.3.0",
     "smol-toml": "1.9.0",
     "ssh2": "1.17.0",
-    "supergateway": "4.0.0"
+    "supergateway": "4.0.0",
+    "ws": "8.22.0"
   },
   "devDependencies": {
+    "@electron/notarize": "2.5.0",
     "@openai/codex": "0.160.0",
     "@types/node": "24.10.0",
     "@types/react": "19.2.4",
     "@types/react-dom": "19.2.2",
     "@types/ssh2": "1.15.5",
+    "@types/ws": "8.18.2",
     "@vitejs/plugin-react": "6.1.1",
     "concurrently": "9.2.4",
     "electron": "44.4.5",
     "electron-builder": "26.15.3",
     "typescript": "7.0.2",
     "vite": "8.3.1",
-    "wait-on": "9.0.1",
-    "ws": "8.22.0",
-    "@electron/notarize": "2.5.0"
+    "wait-on": "9.0.1"
   },
   "build": {
     "appId": "com.agentbridge.studio",
@@ -153,5 +154,12 @@
     "electron@44.4.5": true,
     "ssh2@1.17.0": true,
     "cpu-features@0.0.10": true
+  },
+  "overrides": {
+    "supergateway": {
+      "@modelcontextprotocol/sdk": "1.32.0",
+      "@modelcontextprotocol/client": "2.2.0",
+      "@modelcontextprotocol/core": "2.2.0"
+    }
   }
 }

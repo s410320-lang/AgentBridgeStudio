@@ -17,7 +17,9 @@ export function parseExecutorListener(output: string): number | undefined {
  * A successful environment/info is not permission to enable ordinary model turns.
  */
 export class LocalExecServer {
-  readonly environmentId = `agentbridge-mac-${randomUUID()}`;
+  private currentEnvironmentId = `agentbridge-mac-${randomUUID()}`;
+  get environmentId() { return this.currentEnvironmentId; }
+  private registrations=new Map<string,{rpc:AppServerRpc;url:string}>();
   private token = randomBytes(32).toString("base64url");
   private child?: ChildProcessWithoutNullStreams;
   private localPort?: number;
@@ -58,18 +60,23 @@ export class LocalExecServer {
     return `ws://127.0.0.1:${await this.forward.start()}`;
   }
 
-  async register(rpc: AppServerRpc, execServerUrl: string): Promise<ExecutorRegistration> {
+  async register(rpc: AppServerRpc, execServerUrl: string, environmentId = this.environmentId): Promise<ExecutorRegistration> {
+    if(!/^agentbridge-mac-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(environmentId))throw new Error("Mac 執行環境識別碼無效。");
     if (!this.isRunning || !this.cwd) throw new Error("Mac Executor 尚未啟動。");
     const url = new URL(execServerUrl);
     if (url.protocol !== "ws:" || url.hostname !== "127.0.0.1" || !url.port || url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new Error("Executor 僅允許 SSH loopback 通道。");
-    await rpc.request("environment/add", { environmentId: this.environmentId, execServerUrl, authBearerToken: this.token, connectTimeoutMs: 8000 }, 12000);
-    const info = await rpc.request("environment/info", { environmentId: this.environmentId }, 12000);
+    const registered=this.registrations.get(environmentId);
+    if(registered?.rpc!==rpc||registered.url!==execServerUrl)await rpc.request("environment/add", { environmentId, execServerUrl, authBearerToken: this.token, connectTimeoutMs: 8000 }, 12000);
+    const info = await rpc.request("environment/info", { environmentId }, 12000);
     if (!this.isRunning) throw new Error("Mac Executor 在驗證期間已結束。");
     // The canonical executor cwd must be the specific Mac directory used at startup.
     if (info.cwd !== pathToFileURL(this.cwd).href || typeof info.shell?.name !== "string" || typeof info.shell?.path !== "string" || !info.shell.path.startsWith("/")) throw new Error("Executor 回報的工作目錄或 shell 不符合此 Mac，拒絕使用。");
-    return { environmentId: this.environmentId, cwd: info.cwd, shell: { name: info.shell.name, path: info.shell.path } };
+    this.registrations.set(environmentId,{rpc,url:execServerUrl});
+    this.currentEnvironmentId=environmentId;
+    return { environmentId, cwd: info.cwd, shell: { name: info.shell.name, path: info.shell.path } };
   }
   stop() {
+    this.registrations.clear();
     this.forward?.stop(); this.forward = undefined; this.localPort = undefined;
     const child = this.child; this.child = undefined;
     if (child) { child.kill("SIGTERM"); setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 1000).unref(); }

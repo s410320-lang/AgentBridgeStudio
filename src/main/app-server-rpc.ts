@@ -55,7 +55,7 @@ export class AppServerRpc extends EventEmitter {
         const pending = this.pending.get(message.id);
         if (!pending) continue;
         clearTimeout(pending.timer); this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(typeof message.error.message === "string" ? message.error.message : "App Server RPC 失敗。"));
+        if (message.error) pending.reject(Object.assign(new Error(typeof message.error.message === "string" ? message.error.message : "App Server RPC 失敗。"),{code:message.error.code,codexErrorInfo:message.error.data?.codexErrorInfo||message.error.codexErrorInfo}));
         else if (Object.prototype.hasOwnProperty.call(message, "result")) pending.resolve(message.result);
         else pending.reject(new Error("App Server 回覆缺少 result 或 error。"));
       }
@@ -84,7 +84,13 @@ export function appServerCommand(platform: "windows" | "posix", executable: stri
   }
   const quote = (value: string) => { if (value.includes("\0")) throw new Error("參數包含無效字元。"); return "'" + value.replace(/'/g, "'\\''") + "'"; };
   const isolated = isolateExecutor ? 'bridge_home="${CODEX_HOME:-$HOME/.codex}"; if [ -e "$bridge_home/environments.toml" ]; then echo "AgentBridge requires no Runtime environments.toml override; rename it before connecting." >&2; exit 78; fi; export CODEX_EXEC_SERVER_URL=none; ' : "";
-  return `bash -lc ${quote(`${isolated}exec ${[executable, ...args].map(quote).join(" ")}`)}`;
+  const nativePath='export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ';
+  // Desktop installs need not register a `codex` command in a non-interactive
+  // SSH shell. Only discover alternatives for the default name; an explicit
+  // path must never silently launch a different installation.
+  const discover = executable === 'codex' ? 'bridge_codex=$(type -P codex); if [ ! -f "$bridge_codex" ] || [ ! -x "$bridge_codex" ]; then bridge_codex=""; for bridge_candidate in "$HOME/.local/share/agentbridge-codex-0.160.0/node_modules/.bin/codex" /Applications/Codex.app/Contents/Resources/codex "$HOME/Applications/Codex.app/Contents/Resources/codex" /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex "$HOME/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"; do if [ -f "$bridge_candidate" ] && [ -x "$bridge_candidate" ]; then bridge_codex="$bridge_candidate"; break; fi; done; fi; if [ -z "$bridge_codex" ]; then echo "找不到遠端 Codex 執行檔：已檢查 SSH PATH、獨立相容版本與 Codex／ChatGPT 桌面版。請填入朋友設備上的 Codex 完整執行檔路徑，或在該 SSH 帳號安裝 Codex CLI。" >&2; exit 127; fi; ' : '';
+  const command = executable === 'codex' ? '"$bridge_codex"' : quote(executable);
+  return `bash -lc ${quote(`${nativePath}${isolated}${discover}exec ${command} ${args.map(quote).join(" ")}`)}`;
 }
 export function chooseStdioFlag(help: string) {
   if (/--stdio\b/.test(help)) return "--stdio";

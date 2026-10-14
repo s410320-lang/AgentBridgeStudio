@@ -14,10 +14,11 @@ class FakeExecutor {
   constructor(installation, onClosed) { this.installation = installation; this.onClosed = onClosed; executors.push(this); }
   async start(cwd) { this.cwd = cwd; }
   async reverseForward() { return 'ws://127.0.0.1:45678'; }
-  async register() { return { environmentId: this.environmentId, cwd: this.cwd, shell: { name: 'zsh', path: '/bin/zsh' } }; }
+  async register(_rpc,_url,environmentId) { if(environmentId)this.environmentId=environmentId;return { environmentId: this.environmentId, cwd: this.cwd, shell: { name: 'zsh', path: '/bin/zsh' } }; }
   stop() { this.isRunning = false; }
 }
 let account = { type: 'chatgpt', planType: 'pro', email: 'private', accessToken: 'private' };
+let failResume=false;let resumeEnvironment;
 let quotaResponse={},deferQuota=false,quotaError=false;const pendingQuotas=[];
 
 class Channel extends EventEmitter {
@@ -37,15 +38,16 @@ class Channel extends EventEmitter {
       const id = request.params.ephemeral ? `fixture-probe-${++this.probeCount}` : 'fixture-thread';
       const environments = request.params.ephemeral && this.probeEnvironments !== undefined ? this.probeEnvironments
         : request.method === 'thread/resume' && this.resumeEnvironments !== undefined ? this.resumeEnvironments
-        : request.params.environments || [{ environmentId: 'fixture-mac-environment' }];
+        : request.params.environments || [{ environmentId: resumeEnvironment || 'fixture-mac-environment' }];
       thread = { id, environments };
       this.threads.set(id, { config: this.threadConfig, environments });
     }
     const fixture = this.threads.get(request.params?.threadId);
     const macName = Object.keys((fixture?.config || this.threadConfig)?.mcp_servers || {}).find(name => name.startsWith('agentbridge_mac_'));
+    const environmentMismatch = resumeEnvironment && (fixture?.config || this.threadConfig)?.mcp_servers?.[macName]?.environment_id !== resumeEnvironment;
     const inventory = unexpectedMcp ? [{ name: 'unexpected_windows', tools: { dangerous: {} } }]
       : request.params?.threadId?.startsWith('fixture-probe-') && this.probeMacFailure ? [{ name: macName, runtimeStatus: 'failed', tools: {}, toolsError: 'probe failed' }]
-      : macName ? [{ name: macName, runtimeStatus: fixture?.environments?.length === 0 ? 'disabled' : 'connected', tools: fixture?.environments?.length === 0 ? {} : { mac_fs_read: {} } }] : [];
+      : macName ? [{ name: macName, runtimeStatus: (fixture?.environments?.length === 0 || environmentMismatch) ? 'disabled' : 'connected', tools: (fixture?.environments?.length === 0 || environmentMismatch) ? {} : { mac_fs_read: {} } }] : [];
     const result = request.method === 'initialize' ? { platformOs: 'windows' }
       : request.method === 'account/read' ? { account }
       : request.method === 'account/rateLimits/read' ? quotaResponse
@@ -55,9 +57,10 @@ class Channel extends EventEmitter {
       : request.method === 'mcpServerStatus/list' ? { data: inventory }
       : request.method === 'turn/start' ? { turn: { id: 'fixture-turn' } }
       : {};
-    const rpcError = request.method === 'account/rateLimits/read' && quotaError ? 'quota failed'
+    const rpcError = request.method === 'thread/resume' && failResume ? 'no rollout found for thread id missing-thread'
+      : request.method === 'account/rateLimits/read' && quotaError ? 'quota failed'
       : request.method === 'thread/unsubscribe' && this.unsubscribeError ? 'unsubscribe failed' : undefined;
-    const deliver=()=>this.emit('data',Buffer.from(JSON.stringify({id:request.id,...(rpcError?{error:{code:-1,message:rpcError}}:{result})})+'\n'));
+    const deliver=()=>this.emit('data',Buffer.from(JSON.stringify({id:request.id,...(rpcError?{error:{code:request.method==='thread/resume'&&failResume?-32600:-1,message:rpcError}}:{result})})+'\n'));
     if(request.method==='account/rateLimits/read'&&deferQuota)pendingQuotas.push(deliver);else queueMicrotask(deliver);
   }
   close() { if (!this.closed) { this.closed = true; this.emit('close'); } }
@@ -213,6 +216,33 @@ test('0.160 unloaded resume verifies a Mac-bound ephemeral thread before startin
   }
 });
 
+test('0.6.1 leased worker resumes an old thread without changing another task runtime', async () => {
+  executorEnabled = true; runtimeVersion = '0.160.0';
+  const state = await invoke('connect', input);
+  const rootChannel = clients.at(-1).channel;
+  try {
+    const held = await invoke('acquireTask', { runtimeId: state.runtimeId, taskId: 'held-chat', requestId: 'held-request' });
+    const worker = await invoke('acquireTask', { runtimeId: state.runtimeId, taskId: 'old-chat', requestId: 'resume-worker' });
+    assert.equal(held.runtimeId, state.runtimeId);
+    assert.notEqual(worker.runtimeId, state.runtimeId);
+    const channel = clients.at(-1).channel;
+    channel.resumeEnvironments = [];
+    const savedEnvironment = 'agentbridge-mac-11111111-2222-4333-8444-555555555555';
+    await invoke('send', { runtimeId: worker.runtimeId, requestId: 'resume-worker', prompt: 'continue old chat', conversationId: 'fixture-thread', executorEnvironmentId: savedEnvironment });
+    await waitFor(() => channel.requests.some(r => r.method === 'turn/start'));
+    const probe = channel.requests.find(r => r.method === 'thread/start' && r.params.ephemeral);
+    const turn = channel.requests.find(r => r.method === 'turn/start');
+    assert.deepEqual(probe.params.environments, [{ environmentId: savedEnvironment, cwd: fs.realpathSync(root) }]);
+    assert.deepEqual(turn.params.environments, probe.params.environments);
+    assert.equal(turn.params.threadId, 'fixture-thread');
+    assert.equal(channel.requests.find(r => r.method === 'thread/unsubscribe').params.threadId, 'fixture-probe-1');
+    assert.equal(rootChannel.requests.some(r => ['thread/start', 'thread/resume', 'turn/start'].includes(r.method)), false);
+    assert.equal((await invoke('status', held.runtimeId)).status, 'connected');
+  } finally {
+    await invoke('disconnect', state.runtimeId); runtimeVersion = '0.159.2'; executorEnabled = false;
+  }
+});
+
 test('0.160 new and already bound threads start without an ephemeral probe', async () => {
   executorEnabled = true; runtimeVersion = '0.160.0';
   const state = await invoke('connect', input); const channel = clients.at(-1).channel;
@@ -343,4 +373,99 @@ test('live full permission closes a pending Mac approval, accepts subsequent Mac
   await invoke('send',{runtimeId:state.runtimeId,prompt:'next',conversationId:'fixture-thread'});await waitFor(()=>channel.requests.some(r=>r.method==='thread/resume'));
   const resume=channel.requests.find(r=>r.method==='thread/resume');assert.equal(resume.params.approvalPolicy,'never');assert.equal(resume.params.sandbox,'danger-full-access');
  }finally{await invoke('disconnect',state.runtimeId);executorEnabled=false;}
+});
+
+test('missing remote rollout offers recovery without replaying tools or dropping the connected runtime',async()=>{
+ executorEnabled=true;failResume=true;const state=await invoke('connect',input),channel=clients.at(-1).channel;
+ try{await invoke('send',{runtimeId:state.runtimeId,prompt:'next',conversationId:'missing-thread'});await waitFor(()=>events.some(e=>e.runtimeId===state.runtimeId&&e.type==='done'));
+ assert.ok(events.some(e=>e.runtimeId===state.runtimeId&&e.type==='sessionUnavailable'&&e.conversationId==='missing-thread'));
+ assert.equal(channel.requests.some(r=>r.method==='turn/start'),false);assert.equal((await invoke('status',state.runtimeId)).status,'connected');
+ }finally{failResume=false;executorEnabled=false;await invoke('disconnect',state.runtimeId);}
+});
+test('native retry notifications do not poison a subsequently successful turn; quota codes get a specific message',async()=>{
+ executorEnabled=true;const state=await invoke('connect',input),channel=clients.at(-1).channel;
+ const emit=(method,params)=>channel.emit('data',Buffer.from(JSON.stringify({method,params:{threadId:'fixture-thread',...params}})+'\n'));
+ try{await invoke('send',{runtimeId:state.runtimeId,prompt:'fixture'});await waitFor(()=>channel.requests.some(r=>r.method==='turn/start'));
+ emit('error',{willRetry:true,error:{message:'stream disconnected, retrying'}});
+ emit('turn/completed',{turn:{id:'fixture-turn',status:'completed'}});
+ assert.equal(events.filter(e=>e.runtimeId===state.runtimeId&&e.type==='done').at(-1).status,'completed');
+ await invoke('send',{runtimeId:state.runtimeId,prompt:'again'});await waitFor(()=>channel.requests.filter(r=>r.method==='turn/start').length===2);
+ emit('turn/completed',{turn:{id:'fixture-turn',status:'failed',error:{codexErrorInfo:'UsageLimitExceeded'}}});
+ assert.match(events.filter(e=>e.runtimeId===state.runtimeId&&e.type==='error').at(-1).text,/額度已用完/);
+ }finally{executorEnabled=false;await invoke('disconnect',state.runtimeId);}
+});
+
+test('stopping before initialization completes releases the turn and the same Runtime can resume',async()=>{
+ executorEnabled=true;const state=await invoke('connect',{...input,trustedFingerprint:backend.hostFingerprint(currentKey)}),channel=clients.at(-1).channel;
+ const start=await invoke('send',{runtimeId:state.runtimeId,requestId:'early-stop',prompt:'first'});
+ assert.equal((await invoke('cancel',state.runtimeId,start.requestId)).cancelled,true);
+ await waitFor(()=>events.some(e=>e.requestId==='early-stop'&&e.type==='done'&&e.status==='cancelled'));
+ assert.equal(channel.requests.some(r=>r.method==='turn/start'),false);
+ await invoke('send',{runtimeId:state.runtimeId,requestId:'after-early-stop',prompt:'continue'});
+ await waitFor(()=>channel.requests.some(r=>r.method==='turn/start'));
+ await invoke('disconnect',state.runtimeId);
+});
+
+test('cold resume rebinds the saved Mac executor before validating MCP and starting a model turn',async()=>{
+ executorEnabled=true;resumeEnvironment='agentbridge-mac-11111111-2222-4333-8444-555555555555';const state=await invoke('connect',input),channel=clients.at(-1).channel;
+ try{await invoke('send',{runtimeId:state.runtimeId,requestId:'cold-resume',prompt:'remember',conversationId:'fixture-thread',executorEnvironmentId:resumeEnvironment});
+ await waitFor(()=>events.some(e=>e.requestId==='cold-resume'&&e.type==='error')||channel.requests.some(r=>r.method==='turn/start'));
+ assert.ok(channel.requests.some(r=>r.method==='turn/start'),'cold resume must reach the model turn without disabling Mac MCP');
+ const cfg=channel.requests.find(r=>r.method==='thread/resume').params.config.mcp_servers;assert.equal(Object.values(cfg).find(x=>x.enabled).environment_id,resumeEnvironment);assert.equal(channel.requests.find(r=>r.method==='turn/start').params.environments[0].environmentId,resumeEnvironment);
+ }finally{resumeEnvironment=undefined;executorEnabled=false;await invoke('disconnect',state.runtimeId);}
+});
+
+test('stopping during turn start still releases the turn when the runtime never reports completion',async()=>{
+ executorEnabled=true;const state=await invoke('connect',{...input,trustedFingerprint:backend.hostFingerprint(currentKey)}),channel=clients.at(-1).channel;
+ try{
+  const start=await invoke('send',{runtimeId:state.runtimeId,requestId:'mid-stop',prompt:'first'});
+  await waitFor(()=>channel.requests.some(r=>r.method==='turn/start'));
+  assert.equal((await invoke('cancel',state.runtimeId,start.requestId)).cancelled,true);
+  await waitFor(()=>events.some(e=>e.requestId==='mid-stop'&&e.type==='done'&&e.status==='cancelled'),8000);
+  await invoke('send',{runtimeId:state.runtimeId,requestId:'after-mid-stop',prompt:'continue'});
+  await waitFor(()=>channel.requests.filter(r=>r.method==='turn/start').length===2);
+ }finally{executorEnabled=false;await invoke('disconnect',state.runtimeId);}
+});
+
+test('a late turn completion after the release fallback does not emit a second done',async()=>{
+ executorEnabled=true;const state=await invoke('connect',{...input,trustedFingerprint:backend.hostFingerprint(currentKey)}),channel=clients.at(-1).channel;
+ try{
+  const start=await invoke('send',{runtimeId:state.runtimeId,requestId:'late-stop',prompt:'first'});
+  await waitFor(()=>channel.requests.some(r=>r.method==='turn/start'));
+  assert.equal((await invoke('cancel',state.runtimeId,start.requestId)).cancelled,true);
+  await waitFor(()=>events.some(e=>e.requestId==='late-stop'&&e.type==='done'&&e.status==='cancelled'),8000);
+  channel.emit('data',Buffer.from(JSON.stringify({method:'turn/completed',params:{threadId:'fixture-thread',turn:{id:'fixture-turn',status:'completed'}}})+'\n'));
+  await new Promise(resolve=>setTimeout(resolve,300));
+  assert.equal(events.filter(e=>e.requestId==='late-stop'&&e.type==='done').length,1,'late completion must not double-fire done');
+ }finally{executorEnabled=false;await invoke('disconnect',state.runtimeId);}
+});
+
+test('cancelling a background discussion turn resolves even when the runtime never reports completion',async()=>{
+ executorEnabled=true;const state=await invoke('connect',{...input,trustedFingerprint:backend.hostFingerprint(currentKey)}),channel=clients.at(-1).channel;
+ try{
+  const started=backend.runCodexBackgroundTurn({runtimeId:state.runtimeId,prompt:'discuss'});
+  await waitFor(()=>channel.requests.some(r=>r.method==='turn/start'));
+  assert.deepEqual(await backend.cancelCodexBackgroundTurn(state.runtimeId),{cancelled:true});
+  // Cancel may race the in-flight turn/start: either a resolved cancelled result
+  // or a rejected "turn interrupted" is acceptable. Hanging forever is not.
+  const result=await Promise.race([started.then(value=>value,()=>'rejected'),new Promise(resolve=>setTimeout(()=>resolve('TIMED_OUT'),3000))]);
+  assert.notEqual(result,'TIMED_OUT','background turn must settle on cancel instead of hanging');
+  if(result!=='rejected')assert.equal(result.status,'cancelled');
+ }finally{executorEnabled=false;await invoke('disconnect',state.runtimeId);}
+});
+
+
+test('Codex full mode reaches paths outside cwd on connect and after live upgrade',async()=>{
+ executorEnabled=true;const outside=fs.mkdtempSync(path.join(os.tmpdir(),'ab-codex-outside-'));
+ for(const initial of ['project','full']){
+  const state=await invoke('connect',{...input,permissionMode:initial}),channel=clients.at(-1).channel;
+  try{
+   await invoke('send',{runtimeId:state.runtimeId,prompt:'fixture'});await waitFor(()=>channel.requests.some(r=>r.method==='turn/start'));
+   const config=Object.values(channel.threadConfig.mcp_servers).find(value=>value.enabled&&value.http_headers);
+   const stat=async()=>{const response=await fetch(config.url,{method:'POST',headers:{...config.http_headers,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'mac_fs_stat',arguments:{path:outside}}})});return(await response.json()).result;};
+   let result=await stat();assert.equal(result.isError,initial==='full'?undefined:true);
+   if(initial==='project'){await invoke('permission',state.runtimeId,'full');result=await stat();assert.equal(result.isError,undefined,result.content[0].text);}
+  }finally{await invoke('disconnect',state.runtimeId);}
+ }
+ executorEnabled=false;fs.rmSync(outside,{recursive:true,force:true});
 });

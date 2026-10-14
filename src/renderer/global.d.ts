@@ -8,8 +8,10 @@ export interface DoctorReport { checks: DoctorCheck[]; raw: string }
 declare global {
   interface Window {
     agentBridge: {
+      history:{onChanged?(cb:(value:any)=>void):()=>void;loadDrafts?():Promise<unknown[]|null>;saveDrafts?(input:{ids:string[];changes:unknown[];removedIds?:string[];expectedRevisions?:Record<string,number>}):Promise<{saved:boolean;changes?:any[];removedIds?:string[]}>;load():Promise<unknown[]|null>;save(input:{ids:string[];changes:unknown[];removedIds?:string[];expectedRevisions?:Record<string,number>}):Promise<{saved:boolean;changes?:any[];removedIds?:string[]}>;flushed(id:string,ok:boolean):void;onFlush(cb:(id:string)=>void):()=>void};
+      network:{pair(input:any):Promise<any>;diagnose(input:any):Promise<any>;files(input:any):Promise<any>;transfer(input:any):Promise<any>;cancelTransfer(id:string):Promise<any>;terminal(input:any):Promise<any>;terminalWrite(id:string,text:string):Promise<any>;terminalClose(id:string):Promise<any>;onEvent(cb:(value:any)=>void):()=>void;};
       runtime: {
-        connect(input: { profile: any; password?: string; platform: "auto" | "windows" | "posix"; executable?: string; trustedFingerprint?: string; localCwd?: string; localHostExecutable?: string; permissionMode?: "ask"|"project"|"full" }): Promise<any>;
+        connect(input: { profile: any; password?: string; platform: "auto" | "windows" | "posix"; executable?: string; trustedFingerprint?: string; localCwd?: string; localHostExecutable?: string; permissionMode?: "ask"|"project"|"full"; autoCompactPercent?: number }): Promise<any>;
         disconnect(runtimeId: string): Promise<void>;
         permission(runtimeId:string,mode:"ask"|"project"|"full"):Promise<any>;
         recoverTools(runtimeId:string):Promise<any>;
@@ -17,15 +19,16 @@ declare global {
         models(runtimeId: string): Promise<any[]>;
         usage(runtimeId:string):Promise<any>;
         extensions(runtimeId:string):Promise<{items:any[];warnings:string[]}>;
-        send(input: {runtimeId:string;requestId?:string;prompt:string;conversationId?:string;model?:string;effort?:string;attachments?:string[];localCwd?:string}): Promise<{requestId:string}>;
+        send(input: {runtimeId:string;requestId?:string;prompt:string;conversationId?:string;model?:string;effort?:string;attachments?:string[];localCwd?:string;autoCompactPercent?:number}): Promise<{requestId:string}>;
         cancel(runtimeId: string, requestId: string): Promise<{cancelled:boolean}>;
         respond(input: {runtimeId:string;approvalId:string;decision:"accept"|"decline";answers?:Record<string,string[]>}): Promise<{resolved:boolean}>;
         chooseLocalDirectory(): Promise<string|null>;
         onEvent(cb:(event:any)=>void):()=>void;
       };
       claude: {
+        quota(id:string):Promise<any>;
         login(input:{executable?:string}):Promise<{opened:boolean}>;
-        connect(input: {profile?:any;password?:string;platform?:"auto"|"windows"|"posix";trustedFingerprint?:string;location?:"remote"|"local";nodeExecutable?:string;remoteCwd?:string;localCwd:string;executable?:string;permissionMode?:"ask"|"project"|"full";authMode?:"official"|"api";api?:{baseUrl?:string;apiKey?:string;model?:string}}):Promise<any>;
+        connect(input: {profile?:any;password?:string;platform?:"auto"|"windows"|"posix";trustedFingerprint?:string;location?:"remote"|"local";nodeExecutable?:string;remoteCwd?:string;configDir?:string;localCwd:string;executable?:string;permissionMode?:"ask"|"project"|"full";authMode?:"official"|"api";autoCompactPercent?:number;api?:{baseUrl?:string;apiKey?:string;model?:string}}):Promise<any>;
         disconnect(runtimeId:string):Promise<void>;
         permission(runtimeId:string,mode:"ask"|"project"|"full"):Promise<any>;
         recoverTools(runtimeId:string):Promise<any>;

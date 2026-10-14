@@ -1,11 +1,12 @@
-const {test,after}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {ClaudeLocalRuntime,claudeArguments}=require('../dist-main/claude-local-runtime');
+const {test,after}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {ClaudeLocalRuntime,claudeArguments,claudeAutoCompactEnv}=require('../dist-main/claude-local-runtime');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'ab-claude-native-test-')),marker=path.join(root,'approved.txt'),argvLog=path.join(root,'argv.jsonl'),fake=path.join(root,'claude');after(()=>fs.rmSync(root,{recursive:true,force:true}));
+const originalConfig=process.env.CLAUDE_CONFIG_DIR;process.env.CLAUDE_CONFIG_DIR=root;after(()=>{if(originalConfig===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=originalConfig;});
 fs.writeFileSync(fake,`#!${process.execPath}
 require('node:fs').appendFileSync(${JSON.stringify(argvLog)},JSON.stringify(process.argv)+'\\n');
 const rl=require('node:readline').createInterface({input:process.stdin});const out=v=>process.stdout.write(JSON.stringify(v)+'\\n');
 if(process.argv.includes('--version')){console.log('2.1.fixture');process.exit(0)}if(process.argv.includes('auth')){console.log(JSON.stringify({loggedIn:true,authMethod:'oauth',apiProvider:'firstParty'}));process.exit(0)}
 let active;const session='11111111-1111-4111-8111-111111111111';const done=()=>out({type:'result',session_id:session,usage:{input_tokens:3,cache_read_input_tokens:4,cache_creation_input_tokens:2,output_tokens:5},result:'已完成'});
-rl.on('line',line=>{const m=JSON.parse(line);if(m.type==='control_request'){out({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:m.request.subtype==='initialize'?{account:{tokenSource:'oauth'},models:[{value:'sonnet',displayName:'Native Sonnet',supportedEffortLevels:['high']}],commands:[{name:'fixture-skill'}]}:{mcpServers:[]}}});return}
+rl.on('line',line=>{const m=JSON.parse(line);if(m.type==='control_request'){if(m.request.subtype==='interrupt')done();out({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:m.request.subtype==='initialize'?{account:{tokenSource:'oauth'},models:[{value:'sonnet',displayName:'Native Sonnet',supportedEffortLevels:['high']}],commands:[{name:'fixture-skill'}]}:{mcpServers:[]}}});return}
 if(m.type==='user'){const text=m.message.content[0].text;out({type:'system',subtype:'init',session_id:session,plugins:[{name:'native-plugin'}]});if(text==='wait')return;if(text==='approval'){active='permission-fixture';out({type:'control_request',request_id:active,request:{subtype:'can_use_tool',tool_name:'Write',input:{file_path:${JSON.stringify(marker)}}}});return;}out({type:'assistant',session_id:session,parent_tool_use_id:'subagent',message:{id:'nested',content:[{type:'text',text:'not main'}]}});out({type:'assistant',session_id:session,message:{id:'main',content:[{type:'text',text:'原生回覆'}]}});done();}
 if(m.type==='control_response'&&m.response.request_id===active){if(m.response.response.behavior==='allow')require('node:fs').writeFileSync(${JSON.stringify(marker)},'approved');done();}});
 `,{mode:0o755});
@@ -19,6 +20,11 @@ test('native local runtime streams main replies, reports real turn counts, appro
  await cli.send({requestId:'cancel',prompt:'wait',conversationId:'11111111-1111-4111-8111-111111111111'});assert.equal((await cli.cancel('cancel')).cancelled,true);assert.ok(events.some(e=>e.type==='done'&&e.requestId==='cancel'&&e.status==='cancelled'));
  await cli.send({requestId:'after',prompt:'text',conversationId:'11111111-1111-4111-8111-111111111111'});await waitFor(events,e=>e.type==='done'&&e.requestId==='after');
  }finally{await cli.stop();}
+});
+test('Claude auto-compaction defaults early, respects more aggressive settings, and removes disable flags',()=>{
+ const normal=claudeAutoCompactEnv({DISABLE_AUTO_COMPACT:'1',DISABLE_COMPACT:'1'});assert.equal(normal.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,'70');assert.equal(normal.DISABLE_AUTO_COMPACT,undefined);assert.equal(normal.DISABLE_COMPACT,undefined);
+ assert.equal(claudeAutoCompactEnv({CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:'60'},70).CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,'60');
+ assert.equal(claudeAutoCompactEnv({CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:'90'},70).CLAUDE_AUTOCOMPACT_PCT_OVERRIDE,'70');
 });
 test('native argv never contains MCP bearer secret and rejects invalid model/remote MCP URLs',()=>{
  const args=claudeArguments({cwd:root,mcp:{url:'http://127.0.0.1:1234/mcp',token:'fixture-secret'}});assert.ok(!args.join(' ').includes('fixture-secret'));assert.ok(args.join(' ').includes('${AGENTBRIDGE_MAC_MCP_TOKEN}'));assert.throws(()=>claudeArguments({cwd:root,model:'invalid model'}),/模型/);assert.throws(()=>claudeArguments({cwd:root,mcp:{url:'https://remote.invalid/mcp',token:'fixture'}}),/loopback/);
@@ -36,4 +42,10 @@ test('changing permission mode relaunches the next native turn with bypassPermis
 test('an active bypass turn cannot be relabeled as lower permission until stopped',async()=>{
  const events=[];const cli=new ClaudeLocalRuntime({cwd:root,executable:fake,authMode:'api',permissionMode:'full',onEvent:e=>events.push(e)});
  try{await cli.start();await cli.send({requestId:'downgrade-busy',prompt:'wait'});assert.throws(()=>cli.setPermissionMode('ask'),/先停止/);assert.equal(cli.status().permissionMode,'full');await cli.cancel('downgrade-busy');cli.setPermissionMode('ask');assert.equal(cli.status().permissionMode,'ask');}finally{await cli.stop();}
+});
+
+test('Claude interruption result cannot unlock the composer before the resumed process is ready',async()=>{
+ const launches=()=>fs.readFileSync(argvLog,'utf8').trim().split('\n').map(line=>JSON.parse(line)).filter(args=>args.includes('--permission-mode')).length;
+ let before=0,countAtDone=0;const events=[];const cli=new ClaudeLocalRuntime({cwd:root,executable:fake,authMode:'api',onEvent:e=>{events.push(e);if(e.type==='done'&&e.requestId==='interrupt-result')countAtDone=launches();}});
+ try{await cli.start();await cli.send({requestId:'interrupt-result',prompt:'wait'});before=launches();await cli.cancel('interrupt-result');assert.ok(countAtDone>before,'done arrived before the replacement native process');assert.equal(events.filter(e=>e.type==='done'&&e.requestId==='interrupt-result').length,1);await cli.send({requestId:'continue-immediately',prompt:'text',conversationId:'11111111-1111-4111-8111-111111111111'});await waitFor(events,e=>e.type==='done'&&e.requestId==='continue-immediately');}finally{await cli.stop();}
 });

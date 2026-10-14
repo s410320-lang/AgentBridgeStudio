@@ -4,7 +4,7 @@ import os from 'node:os';
 export type ClaudeAuthMode = 'official'|'api';
 export interface ClaudeApiSettings { baseUrl?:string; apiKey?:string; model?:string }
 export interface ClaudeAuthLaunch { env:NodeJS.ProcessEnv; args:string[]; cleanup():Promise<void> }
-const providerKey=(key:string)=>/^ANTHROPIC_|^CLAUDE_CODE_(?:USE_BEDROCK|USE_VERTEX|USE_FOUNDRY|OAUTH_TOKEN|SUBAGENT_MODEL|MAX_OUTPUT_TOKENS)$/.test(key);
+const providerKey=(key:string)=>/^ANTHROPIC_|^CLAUDE_CODE_(?:USE_BEDROCK|USE_VERTEX|USE_FOUNDRY|SUBAGENT_MODEL|MAX_OUTPUT_TOKENS)$/.test(key);
 const providerSettings=new Set(['model','fallbackModel','apiKeyHelper','awsAuthRefresh','awsCredentialExport','forceLoginMethod','forceLoginOrgUUID','availableModels','modelOverrides']);
 export function isolateOfficialSettings(values:Record<string,any>[], initial:NodeJS.ProcessEnv) {
   const env={...initial};for(const key of Object.keys(env))if(providerKey(key))delete env[key];

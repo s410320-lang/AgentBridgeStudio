@@ -17,3 +17,5 @@ test('each device retains its own platform while switching platform preserves th
  assert.equal(saveCredentialProfile(profile,undefined,()=>'',true).runtimePlatform,'auto');
  assert.equal(saveCredentialProfile({...profile,runtimePlatform:'unexpected'},saved,()=>'',true).runtimePlatform,'auto');
 });
+
+test('Claude login configuration directory is saved per device without changing stored credentials',()=>{const saved=saveCredentialProfile({...profile,claudeConfigDir:' C:\\Users\\friend\\.claude ',password:'fixture-private'},undefined,v=>'encrypted:'+v,true);assert.equal(publicProfile(saved).claudeConfigDir,'C:\\Users\\friend\\.claude');const other=saveCredentialProfile({...profile,id:'other',claudeConfigDir:''},undefined,()=>'',true);assert.equal(other.claudeConfigDir,undefined);});

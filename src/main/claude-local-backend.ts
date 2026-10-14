@@ -1,3 +1,5 @@
+import {TaskRuntimePool} from './task-runtime-pool';
+import {connectNetwork} from './connection-network';
 import {permissionMode} from "./permission-policy";
 import { ipcMain, shell, type BrowserWindow } from "electron";
 import path from "node:path";
@@ -18,19 +20,23 @@ import { runtimeInput, type RuntimeAttachment } from "./runtime-attachments";
 export interface ClaudeLocalDependencies {
   extensionServers?(cwd:string):Promise<MacExtensionServer[]>;
   connectConfig?(input:any):ConnectConfig;
+  connectRelay?(input:any):Promise<Client>;
   emit(channel: string, payload: unknown): void;
   window(): BrowserWindow | null;
   libraryEntries?(ids: string[]): Promise<RuntimeAttachment[]>;
-  libraryRoot?: string;
+  libraryRoot?: string; stateDirectory?:string;
   localTools?: { nativeCommand?: LocalToolCommand; browserCommand?: LocalToolCommand } | (()=>{nativeCommand?:LocalToolCommand;browserCommand?:LocalToolCommand});
   claudeManifest?: () => unknown;
 }
 interface Pending { isQuestion:boolean; resolve(answer: { allow: boolean; updatedInput?: Record<string, unknown> }): void; input: Record<string, unknown>; questions?: any[]; dispose(): void }
-interface Runtime { conn?:Client;forward?:LoopbackForward;hostName?:string;hostKey?:string;cli: ClaudeLocalRuntime; host?: LocalToolHost; pending: Map<string, Pending>; permissionMode: ClaudePermissionMode; cwd: string; closed: boolean; backgroundTextOnly?: boolean; deps: ClaudeLocalDependencies }
+interface Runtime { sendPending?:boolean;network?:any; conn?:Client;forward?:LoopbackForward;hostName?:string;hostKey?:string;cli: ClaudeLocalRuntime; host?: LocalToolHost; pending: Map<string, Pending>; permissionMode: ClaudePermissionMode; cwd: string; closed: boolean; backgroundTextOnly?: boolean; deps: ClaudeLocalDependencies }
+let taskPool:TaskRuntimePool<any>;
+export const acquireClaudeTask=(rootId:string,taskId:string,requestId:string)=>taskPool.acquire(rootId,taskId,requestId);
+export const releaseClaudeTask=(id:string,requestId:string)=>taskPool.release(id,requestId);
 const runtimes = new Map<string, Runtime>();
 function get(id: string) { const runtime = runtimes.get(id); if (!runtime || runtime.closed) throw new Error("Claude 本機連線已中斷，請重新連線。"); return runtime; }
 function emit(runtime: Runtime, event: any) { runtime.deps.emit("claude:event", { runtimeId: runtime.cli.id, ...(runtime.cli.activeRequestId ? { requestId: runtime.cli.activeRequestId } : {}), ...event }); }
-function snapshot(runtime: Runtime) { const native=runtime.cli.status();return { ...native,capabilities:{...native.capabilities,localTools:native.capabilities.localTools&&!!runtime.host?.status().ok},...(runtime.hostName?{hostName:runtime.hostName,hostKey:runtime.hostKey}:{}),macTools: runtime.host?.status(), localToolNames: runtime.host?.listTools().map(t => t.name) || [], toolHostConnected: !!runtime.host?.status().ok }; }
+function snapshot(runtime: Runtime) { const native=runtime.cli.status();return { ...native,...runtime.network,capabilities:{...native.capabilities,localTools:native.capabilities.localTools&&!!runtime.host?.status().ok},...(runtime.hostName?{hostName:runtime.hostName,hostKey:runtime.hostKey}:{}),macTools: runtime.host?.status(), localToolNames: runtime.host?.listTools().map(t => t.name) || [], toolHostConnected: !!runtime.host?.status().ok }; }
 function clearPending(runtime: Runtime) { for (const [id, pending] of runtime.pending) { pending.dispose(); pending.resolve({ allow: false }); emit(runtime, { type: "requestClosed", approvalId: id }); } runtime.pending.clear(); }
 function ask(runtime: Runtime, input: Record<string, unknown>, name: string, signal?: AbortSignal): Promise<{ allow: boolean; updatedInput?: Record<string, unknown> }> {
   if (runtime.closed || !runtime.cli.busy || signal?.aborted || runtime.backgroundTextOnly) return Promise.resolve({ allow: false });
@@ -93,6 +99,10 @@ export async function claudeComputerDiagnostics(id:string){return get(id).host?.
 export async function claudeToolHealth(id:string){return get(id).host?.toolHealth();}
 
 export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
+  const pool=new TaskRuntimePool<any>(async id=>{const runtime=runtimes.get(id);if(runtime)await close(runtime);});
+  taskPool=pool;
+  const emitEvent=deps.emit;
+  deps={...deps,emit:(channel,payload:any)=>{if(payload.type==='done')pool.release(payload.runtimeId,payload.requestId);if(payload.type==='closed')pool.forget(payload.runtimeId);emitEvent(channel,payload);}};
   ipcMain.handle("claude:login",async(_event,input:any={})=>{
     const executable=await findClaudeExecutable(input.executable);
     const quote=(value:string)=>"'"+value.replace(/'/g,"'\\''")+"'";
@@ -103,18 +113,19 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
     await fs.writeFile(file,script,{mode:0o700});const error=await shell.openPath(file);if(error){await fs.rm(directory,{recursive:true,force:true});throw new Error('無法開啟原生登入視窗。請在終端機執行 claude auth login --claudeai。');}
     return{opened:true};
   });
-  ipcMain.handle("claude:connect", async (_event, input: any = {}) => {
+  const connectClaude = async (_event:any, input: any = {}):Promise<any> => {
     // A friend-host profile is mandatory for the remote path. Never fall back to the Mac CLI.
     const remote=input.location!=="local";
-    let conn:Client|undefined;let forward:LoopbackForward|undefined;
-    if(remote){if(!deps.connectConfig)throw new Error("朋友 Runtime SSH 尚未就緒。");const connected=await connectTrustedRuntimeSsh(input,deps.connectConfig);if(connected.confirmation)return connected.confirmation;conn=connected.conn;try{input={...input,platform:await resolveRemotePlatform(conn!,input.platform)};}catch(error){conn?.end();throw error;}}
+    let conn:Client|undefined;let forward:LoopbackForward|undefined;let network:any;
+    if(remote){if(!deps.connectConfig)throw new Error("朋友 Runtime SSH 尚未就緒。");const connected=await connectNetwork(input,()=>connectTrustedRuntimeSsh(input,deps.connectConfig!),()=>{if(!deps.connectRelay)throw new Error('Relay 尚未就緒。');return deps.connectRelay(input);});network={requiresReconnectKey:!!input.api?.apiKey,profileId:input.profile.id,relayUrl:input.profile.relayUrl,transport:connected.transport,networkDiagnostics:connected.diagnostics};if(connected.confirmation)return connected.confirmation;conn=connected.conn;try{input={...input,platform:connected.transport==='https-relay'?((conn as any).platform==='win32'?'windows':'posix'):await resolveRemotePlatform(conn!,input.platform)};}catch(error){conn?.end();throw error;}}
     let cwd:string;try{cwd=await fs.realpath(input.localCwd||input.cwd||os.homedir());if(!(await fs.stat(cwd)).isDirectory())throw new Error("directory required");}catch{conn?.end();throw new Error("請選擇有效的 Mac 工作資料夾。");}
     if (!(await fs.stat(cwd)).isDirectory()) throw new Error("請選擇 Mac 工作資料夾。");
     const permissionMode: ClaudePermissionMode = ["ask", "project", "full"].includes(input.permissionMode) ? input.permissionMode : "ask";
     let runtime: Runtime | undefined; let host: LocalToolHost | undefined; let endpoint: any;
     try {
       if (deps.libraryRoot) await fs.mkdir(deps.libraryRoot, { recursive: true });
-      host = new LocalToolHost({ allowedRoots: [cwd],extensionServers:await deps.extensionServers?.(cwd),enableShell:remote,readOnlyRoots: deps.libraryRoot ? [deps.libraryRoot] : [], agentRole: "claude", ...(typeof deps.localTools==="function"?deps.localTools():deps.localTools),
+      host = new LocalToolHost({ stateDirectory:deps.stateDirectory, allowedRoots: [cwd],extensionServers:await deps.extensionServers?.(cwd),enableShell:remote,readOnlyRoots: deps.libraryRoot ? [deps.libraryRoot] : [], agentRole: "claude", ...(typeof deps.localTools==="function"?deps.localTools():deps.localTools),
+        fullFilesystemAccess:permissionMode === "full",
         authorize: async (call: LocalToolCall) => {
           if (!runtime || runtime.closed || !runtime.cli.busy || runtime.backgroundTextOnly) return false;
           if (call.category === "agent-bridge" || runtime.permissionMode === "full" || (runtime.permissionMode === "project" && call.category === "filesystem-read")) return true;
@@ -123,9 +134,9 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
       endpoint = await host.start();
     } catch(error) { await host?.stop();conn?.end();throw new Error("Mac 工具通道啟動失敗；不會改在朋友電腦執行工作。"); }
     if(conn){try{forward=new LoopbackForward(conn,endpoint.port);const port=await forward.start();endpoint={...endpoint,url:`http://127.0.0.1:${port}/mcp`};}catch(error){await host?.stop();conn.end();throw error;}}
-    const cli = new ClaudeLocalRuntime({ cwd, executable: input.executable, authMode:input.authMode==="official"?"official":"api",api:input.api,permissionMode, model: input.model, effort: input.effort,
+    const cli = new ClaudeLocalRuntime({ cwd, executable: input.executable, authMode:input.authMode==="official"?"official":"api",api:input.api,permissionMode, model: input.model, effort: input.effort, autoCompactPercent:Number.isFinite(Number(input.autoCompactPercent))?Number(input.autoCompactPercent):70,
       additionalDirectories: !remote&&deps.libraryRoot ? [deps.libraryRoot] : [],
-      ...(conn?{remote:{launch:(args:string[],options:any)=>launchRemoteClaude(conn!,{platform:input.platform,nodeExecutable:input.nodeExecutable,executable:input.executable,remoteCwd:input.remoteCwd,args,...options})}}:{}),
+      ...(conn?{remote:{launch:(args:string[],options:any)=>launchRemoteClaude(conn!,{platform:input.platform,nodeExecutable:input.nodeExecutable,executable:input.executable,remoteCwd:input.remoteCwd,configDir:input.configDir,args,...options})}}:{}),
       ...(endpoint && host ? { mcp: { url: endpoint.url, token: endpoint.token, name: "agentbridge_mac" } } : {}),
       onPermission: (request: ClaudePermission) => {
         // Mac MCP requests receive a single approval at the host, including calls the CLI auto-approves.
@@ -138,18 +149,31 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
         if (runtime && event.type === "closed" && !runtime.closed) void close(runtime, event.text);
       }
     });
-    runtime = { cli, host,conn,forward,hostName:remote?(input.profile.name||input.profile.host):undefined,hostKey:remote?`${input.profile.username}@${input.profile.host}:${input.profile.port||22}|claude|${input.authMode}`:undefined,pending: new Map(), permissionMode, cwd, closed: false, deps };
-    conn?.on("close",()=>{if(runtime&&!runtime.closed)void close(runtime,"朋友的 Claude SSH 已中斷。");});
+    runtime = { cli, host,conn,forward,network,hostName:remote?(input.profile.name||input.profile.host):undefined,hostKey:remote?`${input.profile.username}@${input.profile.host}:${input.profile.port||22}|claude|${input.authMode}|${input.remoteCwd||''}`+(input.configDir?'|config:'+input.configDir:''):undefined,pending: new Map(), permissionMode, cwd, closed: false, deps };
+    conn?.on('error',(error:Error)=>{if(runtime&&!runtime.closed)void close(runtime,/ERR_AUTH/.test(error.message)?'ERR_AUTH：Relay 授權已失效，請重新配對。':'網路連線已中斷。');});
+    conn?.on("close",()=>{if(runtime&&!runtime.closed)void close(runtime,"朋友的 Claude 網路連線已中斷；未重送指令。");});
     try { await cli.start();const catalog=await cli.extensions();if(remote&&catalog.mcp.some((server:any)=>server.name!=="agentbridge_mac"))throw new Error("Claude 載入了非 Mac 工具，已停止這次連線。");runtimes.set(cli.id, runtime); return snapshot(runtime); }
-    catch (error) { await cli.stop();forward?.stop();conn?.end();await host?.stop();throw error; }
+    catch (error) { await cli.stop();forward?.stop();conn?.end();await host?.stop();if(input.profile?.networkMode!=='direct'&&input.profile?.networkMode!=='relay'&&network?.transport==='tailscale-ssh'&&input.profile?.relayUrl&&/timeout|timed out|handshake|中斷|結束/i.test(String(error)))return connectClaude(_event,{...input,profile:{...input.profile,networkMode:'relay'}});throw error; }
+  };
+  ipcMain.handle('claude:connect',async(event,input:any)=>{
+    const result=await connectClaude(event,input);
+    if(result.runtimeId)pool.register(result,()=>connectClaude(event,{...input,permissionMode:runtimes.get(result.runtimeId)?.permissionMode||input.permissionMode}));
+    if(result.runtimeId)event.sender?.once('destroyed',()=>{void pool.disconnect(result.runtimeId);});
+    return result;
   });
+  ipcMain.handle('claude:acquireTask',async(_event,input:any)=>{
+    const leased=await pool.acquire(input.runtimeId,input.taskId,input.requestId);
+    return snapshot(get(leased.runtimeId));
+  });
+  ipcMain.handle('claude:releaseTask',(_event,id:string,requestId:string)=>{if(!runtimes.get(id)?.cli.busy)pool.release(id,requestId);});
   ipcMain.handle('claude:permission',(_event,id:string,value:unknown)=>{
-    const runtime=get(id),mode=permissionMode(value);runtime.cli.setPermissionMode(mode);runtime.permissionMode=mode;
+    const runtime=get(id),mode=permissionMode(value);runtime.cli.setPermissionMode(mode);runtime.permissionMode=mode;runtime.host?.setFullFilesystemAccess(mode==='full');
     if(runtime.permissionMode==='full')for(const pending of [...runtime.pending.values()])if(!pending.isQuestion)pending.resolve({allow:runtime.cli.busy&&!runtime.backgroundTextOnly});
     return snapshot(runtime);
   });
   ipcMain.handle('claude:recoverTools',async(_event,id:string)=>{const runtime=get(id);if(runtime.cli.busy)throw new Error('請先停止目前工作，再重新連接工具。');await runtime.host?.recoverProxyTools();return snapshot(runtime);});
-  ipcMain.handle("claude:status", (_event, id: string) => snapshot(get(id)));
+  ipcMain.handle('claude:quota',(_event,id:string)=>get(id).cli.refreshQuota());
+  ipcMain.handle("claude:status", async (_event, id: string) => {const runtime=get(id);await runtime.cli.refreshAccount();return snapshot(runtime);});
   ipcMain.handle("claude:models", (_event, id: string) => get(id).cli.status().models);
   ipcMain.handle("claude:extensions", async (_event, id: string) => {
     const runtime=get(id),native=await runtime.cli.extensions(),source=runtime.conn?"remote":"local";
@@ -157,7 +181,11 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
   });
   ipcMain.handle("claude:send", async (_event, input: any) => {
     const runtime = get(input.runtimeId);
-    if (!runtime.cli.status().account.authenticated) throw new Error("請朋友在 Runtime 主機完成 Claude Code 原生官方登入，或設定 API 供應商後重新連線。");
+    if(runtime.sendPending||runtime.cli.busy)throw new Error("Claude 還在處理上一則訊息。");
+    runtime.sendPending=true;
+    try{
+    if(!runtime.cli.status().account.authenticated)await runtime.cli.refreshAccount();
+    if (!runtime.cli.status().account.authenticated) throw new Error("Claude 原生登入尚未確認；朋友完成登入後可重新發送。");
     if (runtime.cli.busy) throw new Error("Claude 還在處理上一則訊息。");
     if (typeof input.prompt !== "string" || (!input.prompt.trim() && !input.attachments?.length)) throw new Error("請輸入訊息或加入附件。");
     const ids = input.attachments || [];
@@ -166,6 +194,10 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
     if (input.localCwd && await fs.realpath(input.localCwd) !== runtime.cwd) throw new Error("變更 Mac 工作目錄後請重新連線。");
     const attachments = ids.length ? await deps.libraryEntries!(ids) : [];
     const blocks = await runtimeInput(input.prompt.trim() || "請查看並處理附加的檔案。", attachments);
+    if (typeof input.customInstructions === "string" && input.customInstructions.trim()) {
+      blocks.push({ type: "text", text: `使用者自訂指令（適用於本次對話）：\n${input.customInstructions.trim()}` });
+    }
+    // ponytail: cli.send takes an explicit subset — spreading the whole input would smuggle unknown IPC keys into the CLI args
     const content = blocks.map(block => {
       if (block.type === "text") return { type: "text", text: block.text };
       const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.*)$/.exec(block.url);
@@ -173,7 +205,8 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
       return { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } };
     });
     if (runtime.closed || runtime.cli.busy) throw new Error("Claude 已中斷或仍在處理上一則訊息。");
-    return runtime.cli.send({ ...input, content });
+    return await runtime.cli.send({ prompt: input.prompt, requestId: input.requestId, conversationId: input.conversationId, model: input.model, effort: input.effort, autoCompactPercent: input.autoCompactPercent, content, systemPrompt: input.customInstructions });
+    }finally{runtime.sendPending=false;}
   });
   ipcMain.handle("claude:cancel", async (_event, id: string, requestId?: string) => {
     const runtime = get(id); if (requestId && runtime.cli.activeRequestId !== requestId) return { cancelled: false };
@@ -195,5 +228,5 @@ export function registerClaudeLocalBackend(deps: ClaudeLocalDependencies) {
     pending.resolve({ allow: input.decision === "accept" && runtime.cli.busy && !runtime.closed, updatedInput });
     return { resolved: true };
   });
-  ipcMain.handle("claude:disconnect", async (_event, id: string) => { const runtime = runtimes.get(id); if (runtime) await close(runtime); });
+  ipcMain.handle("claude:disconnect", async (_event, id: string) => { await pool.disconnect(id);const runtime = runtimes.get(id); if (runtime) await close(runtime); });
 }

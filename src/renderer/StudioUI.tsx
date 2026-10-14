@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import { SPRINGS } from './motion';
+import {inlineTokens,textPages} from '../main/chat-performance';
 
 export function Glyph({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string,string> = {
@@ -85,12 +86,11 @@ export function Modal({ title, children, close, className = '' }: { title: strin
 }
 
 function inlineText(text:string):ReactNode[] {
-  return text.split(/(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|\*\*[^*]+\*\*|`[^`]+`)/g).map((part,i)=>{
-    const link=part.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
-    if(link)return <a key={i} href={link[2]} onClick={event=>{event.preventDefault();void window.agentBridge.system.openExternal(link[2]);}}>{link[1]}</a>;
-    if(part.startsWith('**')&&part.endsWith('**'))return <strong key={i}>{part.slice(2,-2)}</strong>;
-    if(part.startsWith('`')&&part.endsWith('`'))return <code key={i}>{part.slice(1,-1)}</code>;
-    return part;
+  return inlineTokens(text).map((part,i)=>{
+    if(part.type==='link')return <a key={i} href={part.href} onClick={event=>{event.preventDefault();void window.agentBridge.system.openExternal(part.href!);}}>{part.text}</a>;
+    if(part.type==='bold')return <strong key={i}>{part.text}</strong>;
+    if(part.type==='code')return <code key={i}>{part.text}</code>;
+    return part.text;
   });
 }
 function CodeBlock({text}:{text:string}) {
@@ -120,6 +120,10 @@ function prose(text:string):ReactNode[] {
   }
   return result;
 }
-export function MessageBody({ text }: { text: string }) {
+export const MessageBody = memo(function MessageBody({ text, streaming=false }: { text: string; streaming?:boolean }) {
+  const boundaries=useMemo(()=>textPages(text),[text]);
+  const [selected,setSelected]=useState<number|null>(null);const streamed=useRef(false);if(streaming)streamed.current=true;
+  const pages=Math.max(1,boundaries.length-1),page=Math.min(selected??(streamed.current?pages-1:0),pages-1);
+  if(pages>1)return <div className="message-body long-message"><div className="text-page-controls"><span>第 {page+1} / {pages} 段</span><button disabled={page===0} onClick={()=>setSelected(page-1)}>上一段</button><button disabled={page===pages-1} onClick={()=>setSelected(page+1)}>下一段</button></div><pre className="long-message-text">{text.slice(boundaries[page],boundaries[page+1])}</pre></div>;
   return <div className="message-body">{text.split(/(```[\s\S]*?(?:```|$))/g).map((block,i)=>block.startsWith('```')?<CodeBlock key={i} text={block}/>:<div key={i}>{prose(block)}</div>)}</div>;
-}
+});

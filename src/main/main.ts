@@ -1,3 +1,6 @@
+import {ChatHistoryStore} from './chat-history';
+import {RelayStore} from './relay-store';
+import {registerRelayServices} from './relay-services';
 import {ComputerProviderStore} from "./computer-provider";
 import {browserRuntimeArgs} from "./browser-runtime";
 import {hasLiveLocalToolHosts} from "./local-tool-host";
@@ -43,7 +46,7 @@ interface ConnectionProfile {
   keyPath?: string;
   savePassword?: boolean;
   encryptedPassword?: string;
-  runtimePlatform?: 'auto' | 'windows' | 'posix';
+  networkMode?:'auto'|'direct'|'relay';relayUrl?:string;claudeConfigDir?:string;runtimePlatform?: 'auto' | 'windows' | 'posix';
 }
 
 interface ConnectPayload {
@@ -125,6 +128,16 @@ app.on("second-instance", () => {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+});
+ipcMain.handle("system:openWindow", async () => {
+  await createWindow();
+});
+ipcMain.handle("system:notify", async (_event, text: string) => {
+  if (typeof text !== "string" || !text.trim()) return;
+  // ponytail: macOS Notification requires a bundle id; falls back to dock bounce in dev
+  const { Notification } = await import("electron");
+  if (Notification.isSupported()) { const note = new Notification({ title: "AgentBridge Studio", body: text.slice(0, 200) }); void note.show(); }
+  else app.dock?.bounce();
 });
 
 function appDataPath(...parts: string[]) {
@@ -233,7 +246,7 @@ function networkAddresses() {
   return result.sort((a, b) => (a.kind === "tailscale" ? -1 : b.kind === "tailscale" ? 1 : 0));
 }
 function emit(channel: string, payload: unknown) {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  for(const window of BrowserWindow.getAllWindows())if(!window.isDestroyed()&&!window.webContents.isDestroyed())window.webContents.send(channel,payload);
 }
 
 function transferSnapshot(task: TransferTask) {
@@ -683,8 +696,33 @@ function stopSession(session: RemoteSession) {
   try { session.conn.end(); } catch {}
   sessions.delete(session.id);
 }
+const composerDrafts=new ChatHistoryStore(appDataPath('composer-drafts'));
+ipcMain.handle('history:loadDrafts',()=>composerDrafts.load());
+ipcMain.handle('history:saveDrafts',(_event,input)=>composerDrafts.save(input));
+const chatHistory=new ChatHistoryStore(appDataPath('chat-history'));
+ipcMain.handle('history:load',()=>chatHistory.load());
+ipcMain.handle('history:save',async(event,input)=>{
+  const result=await chatHistory.save(input);
+  for(const window of BrowserWindow.getAllWindows())if(window.webContents.id!==event.sender.id&&!window.webContents.isDestroyed())window.webContents.send('history:changed',result);
+  return result;
+});
+const historyCloseAllowed=new Set<number>(),historyFlushes=new Map<number,Promise<boolean>>();
+async function flushHistoryBeforeClose(window:BrowserWindow):Promise<boolean>{
+  if(window.isDestroyed())return true;
+  const pending=historyFlushes.get(window.id);if(pending)return pending;
+  const id=randomUUID();
+  const flush=new Promise<boolean>(resolve=>{
+    const finish=(ok:boolean)=>{clearTimeout(timer);ipcMain.removeListener('history:flushed',ack);historyFlushes.delete(window.id);if(!ok)window.webContents.send('toast',{message:'對話尚未儲存完成，請稍後再關閉或先匯出。'});resolve(ok);};
+    const ack=(event:Electron.IpcMainEvent,replyId:string,ok:boolean)=>{if(event.sender.id===window.webContents.id&&replyId===id)finish(ok===true);};
+    const timer=setTimeout(()=>finish(false),5000);ipcMain.on('history:flushed',ack);window.webContents.send('history:flush',id);
+  });historyFlushes.set(window.id,flush);return flush;
+}
+app.on('before-quit',event=>{
+ const windows=BrowserWindow.getAllWindows().filter(window=>!historyCloseAllowed.has(window.id));if(!windows.length)return;
+ event.preventDefault();void Promise.all(windows.map(window=>flushHistoryBeforeClose(window))).then(results=>{if(results.every(Boolean)){for(const window of windows)historyCloseAllowed.add(window.id);app.quit();}});
+});
 async function createWindow() {
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 720,
@@ -700,12 +738,12 @@ async function createWindow() {
       sandbox: false
     }
   });
-  mainWindow.on("closed", () => { mainWindow = null; });
-  if (process.env.AGENTBRIDGE_DEV_URL) {
-    await mainWindow.loadURL(process.env.AGENTBRIDGE_DEV_URL);
-  } else {
-    await mainWindow.loadFile(path.join(__dirname, "../dist-renderer/index.html"));
-  }
+  mainWindow=window;
+  window.on("focus",()=>{mainWindow=window;});
+  window.on("close",event=>{if(historyCloseAllowed.has(window.id))return;event.preventDefault();void flushHistoryBeforeClose(window).then(ok=>{if(ok){historyCloseAllowed.add(window.id);window.close();}});});
+  window.on("closed",()=>{historyCloseAllowed.delete(window.id);if(mainWindow===window)mainWindow=BrowserWindow.getAllWindows()[0]||null;});
+  if(process.env.AGENTBRIDGE_DEV_URL)await window.loadURL(process.env.AGENTBRIDGE_DEV_URL);
+  else await window.loadFile(path.join(__dirname,"../dist-renderer/index.html"));
 }
 
 if (primaryInstance) app.whenReady().then(createWindow);
@@ -727,7 +765,7 @@ ipcMain.handle("profiles:save", (_event, incoming: ConnectionProfile & { passwor
   const profile=saveCredentialProfile(incoming,index>=0?profiles[index]:undefined,value=>safeStorage.encryptString(value).toString("base64"),safeStorage.isEncryptionAvailable());
   if(index>=0)profiles[index]=profile;else profiles.unshift(profile);writeProfiles(profiles);return profiles.map(publicProfile);
 });
-ipcMain.handle("profiles:delete", (_event,id:string)=>{const profiles=readProfiles().filter(profile=>profile.id!==id);writeProfiles(profiles);return profiles.map(publicProfile);});
+ipcMain.handle("profiles:delete", (_event,id:string)=>{relayStore.forget(id);const profiles=readProfiles().filter(profile=>profile.id!==id);writeProfiles(profiles);return profiles.map(publicProfile);});
 
 ipcMain.handle("ssh:connect", async (_event, payload: ConnectPayload) => {
   const conn = new Client();
@@ -1324,8 +1362,11 @@ ipcMain.handle('extensions:loginMcp',async(_event,id:string)=>{
   if(!spec?.url)throw new Error('找不到可在 Mac 登入的 MCP 設定。');
   return beginMacMcpLogin({file:macMcpAuthFile(),url:spec.url,codec:macMcpCodec,open:url=>shell.openExternal(url),notify:message=>emit('toast',{message})});
 });
+const relayStore=new RelayStore(appDataPath('relay-devices.json'),macMcpCodec);
+registerRelayServices(relayStore,emit);
 const runtimeDependencies = {
-  connectConfig, emit, window: () => mainWindow,
+  stateDirectory:appDataPath("agent-task-checkpoints"),
+  connectConfig, connectRelay:(input:any)=>relayStore.connect(input), emit, window: () => mainWindow,
   extensions: async (cwd:string) => {
     const catalog=await localExtensions({cwd,agent:"codex"});
     const discovery=await discoverMacCodexServers({cwd});

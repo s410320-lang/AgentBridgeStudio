@@ -20,7 +20,7 @@ interface Profile {
   savePassword?: boolean;
   hasSavedPassword?:boolean;
   encryptedPassword?: string;
-  runtimePlatform?: 'auto' | 'windows' | 'posix';
+  networkMode?:'auto'|'direct'|'relay';relayUrl?:string;claudeConfigDir?:string;runtimePlatform?: 'auto' | 'windows' | 'posix';
 }
 interface SessionInfo {
   sessionId: string;
@@ -235,7 +235,7 @@ function ConnectionForm({
       )}
       <div className="form-actions">
         <button className="secondary" onClick={onSave}>儲存連線</button>
-        <button className="primary" disabled={busy || !draft.host || !draft.username} onClick={onConnect}>
+        <button className="primary" disabled={busy || (draft.networkMode!=='direct'&&draft.relayUrl?false:(!draft.host||!draft.username))} onClick={onConnect}>
           {busy ? "連線中…" : connectLabel}
         </button>
       </div>
